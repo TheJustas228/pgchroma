@@ -125,7 +125,7 @@ def assert_same(got: Any, expected: Any, path: str = "$", rel: float = 1e-5) -> 
         assert len(got) == len(expected), (
             f"{path}: length {len(got)} != {len(expected)}: {got!r} vs {expected!r}"
         )
-        for i, (g, e) in enumerate(zip(got, expected)):
+        for i, (g, e) in enumerate(zip(got, expected, strict=True)):
             assert_same(g, e, f"{path}[{i}]", rel)
     else:
         assert got == expected, f"{path}: {got!r} != {expected!r}"

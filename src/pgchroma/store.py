@@ -12,7 +12,9 @@ Every collection owns a table `c_<uuid hex>`:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -33,6 +35,9 @@ from .config import (
 from .db import PgInfo
 from .errors import ChromaError, DuplicateError, InternalError, InvalidArgumentError, NotFoundError
 from .filters import compile_where, compile_where_document
+from .indexing import ensure_index, index_plan
+
+log = logging.getLogger("pgchroma")
 
 INCLUDABLE = ("documents", "embeddings", "metadatas", "distances", "uris")
 _RESERVED_METADATA_KEY = "chroma:document"
@@ -234,6 +239,8 @@ class Store:
         self.pool = pool
         self.info = info
         self.index_threshold = index_threshold
+        self._indexed: set[uuid.UUID] = set()
+        self._index_tasks: dict[uuid.UUID, asyncio.Task] = {}
 
     @contextlib.asynccontextmanager
     async def _tx(self) -> AsyncIterator[psycopg.AsyncConnection]:
@@ -649,7 +656,31 @@ class Store:
             )
 
     async def _after_write(self, coll: CollectionRef) -> None:
-        """Hook for index maintenance (see indexing.py)."""
+        """Start a background HNSW build once the collection is big enough (see indexing.py)."""
+        if coll.id in self._indexed or coll.id in self._index_tasks:
+            return
+        plan = index_plan(coll.dimension, coll.space, self.info)
+        if plan is None:
+            return
+        table = f"c_{coll.id.hex}"
+
+        async def build() -> None:
+            try:
+                if await ensure_index(
+                    self.pool, table, plan, coll.configuration.get("hnsw", {}), self.index_threshold
+                ):
+                    self._indexed.add(coll.id)
+            except Exception:  # never fail a write because an index build failed
+                log.exception("HNSW index build failed for %s", table)
+            finally:
+                self._index_tasks.pop(coll.id, None)
+
+        self._index_tasks[coll.id] = asyncio.create_task(build())
+
+    async def wait_for_indexing(self) -> None:
+        """Wait for background index builds (tests and graceful shutdown)."""
+        while self._index_tasks:
+            await asyncio.gather(*list(self._index_tasks.values()), return_exceptions=True)
 
     def _filters(self, ids, where, where_document) -> tuple[sql.Composable, list]:
         w_sql, w_params = compile_where(where)
@@ -761,20 +792,39 @@ class Store:
             cond, params = self._filters(ids, where, where_document)
             op, dist = _SPACE_SQL[coll.space]
             dist_sql = dist.format(q="q.v")
+            plan = index_plan(coll.dimension, coll.space, self.info)
+            order_sql = plan.order_by("q.v") if plan else f"embedding {op} q.v"
+            filtered = bool(where) or bool(where_document) or ids is not None
             inner_cols = self._select_columns(include)
             query = sql.SQL(
                 "SELECT q.ord, r.id, r.distance{extra} FROM unnest(%s::vector[]) WITH ORDINALITY AS q(v, ord) "
                 "CROSS JOIN LATERAL (SELECT id, seq, {dist} AS distance{inner} FROM {t} WHERE {c} "
-                "ORDER BY embedding {op} q.v, seq LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
+                "ORDER BY {order}, seq LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
             ).format(
                 extra=sql.SQL("".join(", " + c for c in cols)),
                 dist=sql.SQL(dist_sql),
                 inner=sql.SQL("".join(", " + c for c in inner_cols)),
                 t=coll.table,
                 c=cond,
-                op=sql.SQL(op),
+                order=sql.SQL(order_sql),
             )
+            ef_search = int(coll.configuration.get("hnsw", {}).get("ef_search", 100))
             async with self._tx() as conn:
+                # ef_search must cover n_results or HNSW returns fewer rows (max 1000).
+                await conn.execute(
+                    "SELECT set_config('hnsw.ef_search', %s, true)",
+                    (str(min(1000, max(ef_search, n_results))),),
+                )
+                if filtered:
+                    if self.info.has_iterative_scan:
+                        # pgvector 0.8: keep scanning the index until enough rows pass the filter.
+                        await conn.execute(
+                            "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"
+                        )
+                    else:
+                        # Older pgvector filters after the index scan and can return too few
+                        # rows; fall back to exact search for filtered queries.
+                        await conn.execute("SELECT set_config('enable_indexscan', 'off', true)")
                 rows = await (
                     await conn.execute(query, [list(query_embeddings), *params, n_results])
                 ).fetchall()

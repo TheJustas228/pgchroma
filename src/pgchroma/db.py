@@ -29,6 +29,10 @@ class PgInfo:
     def has_sparsevec(self) -> bool:
         return self.pgvector_version >= (0, 7, 0)
 
+    @property
+    def has_halfvec(self) -> bool:
+        return self.pgvector_version >= (0, 7, 0)
+
 
 def check_schema_name(schema: str) -> str:
     if not _SCHEMA_RE.match(schema):
