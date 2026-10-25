@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pgchroma"
+version = "0.1.0"
+description = "Chroma-compatible server on Postgres + pgvector. Keep your Chroma code, keep your data in Postgres."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Justas", email = "justassinkevicius228@gmail.com" }]
+keywords = ["chroma", "chromadb", "postgres", "pgvector", "vector-database", "rag", "embeddings", "migration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "starlette>=0.37",
+    "uvicorn[standard]>=0.29",
+    "psycopg[binary,pool]>=3.1.18",
+    "pgvector>=0.3",
+    "orjson>=3.9",
+    "numpy>=1.24",
+    "httpx>=0.27",
+    "rich>=13",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheJustas228/pgchroma"
+Issues = "https://github.com/TheJustas228/pgchroma/issues"
+
+[project.scripts]
+pgchroma = "pgchroma.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pgserver>=0.1.4",
+    "chromadb==1.5.9; python_version >= '3.11'",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pgchroma"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
