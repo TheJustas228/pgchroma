@@ -32,3 +32,44 @@ async def pool(database_url):
     async with p.connection() as conn:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
     await p.close()
+
+
+# ---------------------------------------------------------------- real servers
+
+
+@pytest.fixture(scope="session")
+def real_chroma():
+    pytest.importorskip("chromadb")
+    from harness import ChromaProcess
+
+    try:
+        proc = ChromaProcess()
+    except FileNotFoundError:
+        pytest.skip("the real Chroma server binary is not available")
+    yield proc
+    proc.stop()
+
+
+@pytest.fixture(scope="session")
+def pgchroma_server(database_url):
+    from harness import PgChromaThread
+
+    server = PgChromaThread(database_url, allow_reset=True)
+    yield server
+    server.stop()
+
+
+def _clean(client):
+    for c in client.list_collections():
+        client.delete_collection(c.name)
+
+
+@pytest.fixture
+def clients(real_chroma, pgchroma_server):
+    """(real Chroma client, pgchroma client), both starting with no collections."""
+    from harness import make_client
+
+    real, ours = make_client(real_chroma.url), make_client(pgchroma_server.url)
+    _clean(real)
+    _clean(ours)
+    return real, ours
