@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
 from collections.abc import Callable
@@ -107,14 +108,10 @@ async def _checkpoint(
 
 
 async def _ensure_target(store: Store, tenant: str, database: str) -> None:
-    try:
+    with contextlib.suppress(DuplicateError):
         await store.create_tenant(tenant)
-    except DuplicateError:
-        pass
-    try:
+    with contextlib.suppress(DuplicateError):
         await store.create_database(tenant, database)
-    except DuplicateError:
-        pass
 
 
 async def _target_collection(
