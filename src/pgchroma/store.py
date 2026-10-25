@@ -419,7 +419,7 @@ class Store:
             rows = await (
                 await conn.execute(
                     f"SELECT {_COLLECTION_COLUMNS} FROM collections c JOIN databases d ON d.id = c.database_id "
-                    "WHERE d.tenant = %s AND d.name = %s ORDER BY c.created_at, c.name LIMIT %s OFFSET %s",
+                    "WHERE d.tenant = %s AND d.name = %s ORDER BY c.id LIMIT %s OFFSET %s",
                     (tenant, database, limit, offset or 0),
                 )
             ).fetchall()
@@ -699,7 +699,16 @@ class Store:
             ("metadatas", "metadata"),
             ("uris", "uri"),
         ):
-            if item in include:
+            if item not in include:
+                continue
+            if col == "metadata" and not prefix:
+                # Chroma keeps uris inside the metadata record, so a record with a uri and
+                # no metadata reads back as {} rather than null.
+                cols.append(
+                    "CASE WHEN metadata IS NULL AND uri IS NOT NULL THEN '{}'::jsonb "
+                    "ELSE metadata END AS metadata"
+                )
+            else:
                 cols.append(prefix + col)
         return cols
 

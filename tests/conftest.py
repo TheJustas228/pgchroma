@@ -37,8 +37,9 @@ async def pool(database_url):
 # ---------------------------------------------------------------- real servers
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def real_chroma():
+    """A fresh reference Chroma server per test (~1s), so no state carries between tests."""
     pytest.importorskip("chromadb")
     from harness import ChromaProcess
 
@@ -70,6 +71,5 @@ def clients(real_chroma, pgchroma_server):
     from harness import make_client
 
     real, ours = make_client(real_chroma.url), make_client(pgchroma_server.url)
-    _clean(real)
     _clean(ours)
     return real, ours

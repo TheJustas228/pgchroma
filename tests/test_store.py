@@ -218,13 +218,17 @@ async def test_delete_and_count(store):
     assert await store.delete(c, ["a", "b", "c"], None, {"$contains": "2"}, None) == 2
     assert await store.count(c) == 1
     assert await store.delete(c, None, {"s": "nope"}, None, None) == 0
+    # pgchroma reports the exact number deleted (Chroma reports len(ids) for id-only deletes)
+    assert await store.delete(c, ["c", "missing"], None, None, None) == 1
 
 
 async def test_collections_lifecycle(store):
     a = await store.create_collection(T, D, "aaa", None, None, None, False)
     await store.create_collection(T, D, "bbb", None, None, None, False)
-    assert [c["name"] for c in await store.list_collections(T, D, None, None)] == ["aaa", "bbb"]
-    assert [c["name"] for c in await store.list_collections(T, D, 1, 1)] == ["bbb"]
+    listed = await store.list_collections(T, D, None, None)
+    assert [c["id"] for c in listed] == sorted(c["id"] for c in listed)  # Chroma orders by id
+    assert {c["name"] for c in listed} == {"aaa", "bbb"}
+    assert [c["id"] for c in await store.list_collections(T, D, 1, 1)] == [listed[1]["id"]]
     assert await store.count_collections(T, D) == 2
     await store.update_collection(T, D, a["id"], "ccc", {"m": 1}, None)
     got = await store.get_collection(T, D, "ccc")

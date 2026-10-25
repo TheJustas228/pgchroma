@@ -91,19 +91,44 @@ def make_client(url: str):
     )
 
 
-def normalize(value: Any, digits: int = 5) -> Any:
-    """Make client results comparable: numpy -> lists, floats rounded."""
+def normalize(value: Any) -> Any:
+    """Make client results comparable: numpy -> plain Python containers and numbers."""
     if isinstance(value, np.ndarray):
-        return normalize(value.tolist(), digits)
-    if isinstance(value, (np.floating, float)):
-        return round(float(value), digits)
+        return normalize(value.tolist())
+    if isinstance(value, np.floating):
+        return float(value)
     if isinstance(value, np.integer):
         return int(value)
     if isinstance(value, dict):
-        return {k: normalize(v, digits) for k, v in value.items() if k != "data"}
+        return {k: normalize(v) for k, v in value.items() if k != "data"}
     if isinstance(value, (list, tuple)):
-        return [normalize(v, digits) for v in value]
+        return [normalize(v) for v in value]
     return value
+
+
+def assert_same(got: Any, expected: Any, path: str = "$", rel: float = 1e-5) -> None:
+    """Deep equality where floats may differ by float32 rounding (Chroma computes in f32)."""
+    if isinstance(expected, float) and isinstance(got, (int, float)) and not isinstance(got, bool):
+        assert type(got) is float, f"{path}: expected a float, got {got!r}"
+        assert abs(got - expected) <= rel * max(1.0, abs(expected)), (
+            f"{path}: {got!r} != {expected!r}"
+        )
+        return
+    assert type(got) is type(expected), (
+        f"{path}: type {type(got).__name__} != {type(expected).__name__} ({got!r} vs {expected!r})"
+    )
+    if isinstance(expected, dict):
+        assert set(got) == set(expected), f"{path}: keys {sorted(got)} != {sorted(expected)}"
+        for k in expected:
+            assert_same(got[k], expected[k], f"{path}.{k}", rel)
+    elif isinstance(expected, (list, tuple)):
+        assert len(got) == len(expected), (
+            f"{path}: length {len(got)} != {len(expected)}: {got!r} vs {expected!r}"
+        )
+        for i, (g, e) in enumerate(zip(got, expected)):
+            assert_same(g, e, f"{path}[{i}]", rel)
+    else:
+        assert got == expected, f"{path}: {got!r} != {expected!r}"
 
 
 def outcome(fn, client) -> tuple[str, Any]:
