@@ -6,9 +6,11 @@ import re
 from dataclasses import dataclass
 from importlib import resources
 
+import orjson
 import psycopg
 from pgvector.psycopg import register_vector_async
 from psycopg import sql
+from psycopg.types.json import set_json_loads
 from psycopg_pool import AsyncConnectionPool
 
 _SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -83,6 +85,7 @@ async def open_pool(
     async def configure(conn: psycopg.AsyncConnection) -> None:
         await conn.execute(sql.SQL("SET search_path TO {}").format(search_path))
         await register_vector_async(conn)
+        set_json_loads(orjson.loads, conn)
         await conn.commit()
 
     pool = AsyncConnectionPool(
@@ -103,7 +106,9 @@ async def bootstrap(pool: AsyncConnectionPool, schema: str) -> PgInfo:
     ddl = resources.files("pgchroma").joinpath("catalog.sql").read_text()
     async with pool.connection() as conn:
         async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"pgchroma:{schema}",))
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"pgchroma:{schema}",)
+            )
             await conn.execute(ddl)
         row = await (
             await conn.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")

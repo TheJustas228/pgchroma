@@ -20,7 +20,18 @@ import orjson
 from .errors import InvalidArgumentError
 
 _COMPARE = {"$gt": ">", "$gte": ">=", "$lt": "<", "$lte": "<="}
-_WHERE_OPS = ("$gt", "$gte", "$lt", "$lte", "$ne", "$eq", "$in", "$nin", "$contains", "$not_contains")
+_WHERE_OPS = (
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$ne",
+    "$eq",
+    "$in",
+    "$nin",
+    "$contains",
+    "$not_contains",
+)
 _DOC_OPS = ("$contains", "$not_contains", "$regex", "$not_regex")
 
 # A jsonb number written without '.', 'e' or 'E' is an integer (Chroma's int metadata type).
@@ -93,7 +104,9 @@ def _list_contains(key: str, value: Any) -> tuple[str, list]:
             [key, key, _jsonb([value])],
         )
     if isinstance(value, int):
-        elem = "(jsonb_typeof(e) = 'number' AND e::text !~ '[.eE]' AND e::text::numeric = %s::numeric)"
+        elem = (
+            "(jsonb_typeof(e) = 'number' AND e::text !~ '[.eE]' AND e::text::numeric = %s::numeric)"
+        )
     else:
         elem = "(jsonb_typeof(e) = 'number' AND e::text ~ '[.eE]' AND e::text::float8 = %s::float8)"
     return (
@@ -149,7 +162,13 @@ def _field(key: str, cond: Any) -> tuple[str, list]:
             not isinstance(value, list)
             or not value
             or not all(_is_scalar(v) for v in value)
-            or len({str if isinstance(v, str) else bool if isinstance(v, bool) else float for v in value}) != 1
+            or len(
+                {
+                    str if isinstance(v, str) else bool if isinstance(v, bool) else float
+                    for v in value
+                }
+            )
+            != 1
         ):
             raise InvalidArgumentError(
                 f"Expected where operand value to be a non-empty list, and all values to be of the same type got {value!r}"
