@@ -21,6 +21,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from . import __version__
+from . import search as search_api
 from .db import bootstrap, open_pool
 from .errors import (
     AuthError,
@@ -366,7 +367,9 @@ class API:
         return JSON(result)
 
     async def search(self, request: Request) -> JSON:
-        raise NotSupportedError("The Search API is not supported by this pgchroma version")
+        body = await _body(request)
+        coll = await self._coll(request)
+        return JSON(await search_api.search(self.s, coll, body))
 
     async def not_supported(self, request: Request) -> JSON:
         raise NotSupportedError(f"{request.url.path} is not supported by pgchroma")

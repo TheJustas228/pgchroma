@@ -249,3 +249,57 @@ def compile_where_document(where_document: dict | None) -> tuple[str, list]:
     if where_document is None or where_document == {}:
         return "TRUE", []
     return _document(where_document)
+
+
+_ID_OPS = ("$eq", "$ne", "$in", "$nin")
+
+
+def _id_condition(cond: Any) -> tuple[str, list]:
+    if isinstance(cond, str):
+        cond = {"$eq": cond}
+    if not isinstance(cond, dict) or len(cond) != 1:
+        raise InvalidArgumentError(
+            f"Expected #id filter to have exactly one operator, got {cond!r}"
+        )
+    op, value = next(iter(cond.items()))
+    if op not in _ID_OPS:
+        raise InvalidArgumentError(
+            f"Expected #id operator to be one of {', '.join(_ID_OPS)}, got {op}"
+        )
+    if op in ("$eq", "$ne"):
+        if not isinstance(value, str):
+            raise InvalidArgumentError(f"Expected #id value to be a str, got {value!r}")
+        return ("(id = %s)" if op == "$eq" else "(id <> %s)"), [value]
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise InvalidArgumentError(f"Expected #id {op} value to be a list of str, got {value!r}")
+    return ("(id = ANY(%s))" if op == "$in" else "(NOT (id = ANY(%s)))"), [value]
+
+
+def _search_filter(f: Any) -> tuple[str, list]:
+    if not isinstance(f, dict) or not f:
+        raise InvalidArgumentError(f"Expected filter to be a non-empty dict, got {f!r}")
+    parts = []
+    for key, cond in f.items():
+        if key in ("$and", "$or"):
+            parts.append(_logical(key, cond, _search_filter))
+        elif key == "#document":
+            parts.append(_document(cond))
+        elif key == "#id":
+            parts.append(_id_condition(cond))
+        elif key.startswith("#") or key.startswith("$"):
+            raise InvalidArgumentError(f"Unsupported filter key {key!r}")
+        else:
+            parts.append(_field(key, cond))
+    if len(parts) == 1:
+        return parts[0]
+    params: list = []
+    for _, p in parts:
+        params.extend(p)
+    return "(" + " AND ".join(f"COALESCE({s}, FALSE)" for s, _ in parts) + ")", params
+
+
+def compile_search_filter(f: dict | None) -> tuple[str, list]:
+    """Search API filters: `where` syntax plus the `#document` and `#id` keys."""
+    if f is None or f == {}:
+        return "TRUE", []
+    return _search_filter(f)

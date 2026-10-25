@@ -771,6 +771,53 @@ class Store:
         result["include"] = include
         return result
 
+    async def knn(
+        self,
+        coll: CollectionRef,
+        queries: np.ndarray,
+        n: int,
+        cond: sql.Composable,
+        params: list,
+        filtered: bool,
+        columns: list[str],
+    ) -> list[tuple]:
+        """Nearest neighbours for each query: rows of (query ordinal, id, distance, seq, *columns)."""
+        op, dist = _SPACE_SQL[coll.space]
+        plan = index_plan(coll.dimension, coll.space, self.info)
+        order_sql = plan.order_by("q.v") if plan else f"embedding {op} q.v"
+        outer = "".join(", r." + c.rsplit(" AS ", 1)[-1] for c in columns)
+        query = sql.SQL(
+            "SELECT q.ord, r.id, r.distance, r.seq{outer} "
+            "FROM unnest(%s::vector[]) WITH ORDINALITY AS q(v, ord) "
+            "CROSS JOIN LATERAL (SELECT id, seq, {dist} AS distance{inner} FROM {t} WHERE {c} "
+            "ORDER BY {order}, seq LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
+        ).format(
+            outer=sql.SQL(outer),
+            dist=sql.SQL(dist.format(q="q.v")),
+            inner=sql.SQL("".join(", " + c for c in columns)),
+            t=coll.table,
+            c=cond,
+            order=sql.SQL(order_sql),
+        )
+        ef_search = int(coll.configuration.get("hnsw", {}).get("ef_search", 100))
+        async with self._tx() as conn:
+            # ef_search must cover n or HNSW returns fewer rows (pgvector allows up to 1000).
+            await conn.execute(
+                "SELECT set_config('hnsw.ef_search', %s, true)",
+                (str(min(1000, max(ef_search, n))),),
+            )
+            if filtered:
+                if self.info.has_iterative_scan:
+                    # pgvector 0.8: keep scanning the index until enough rows pass the filter.
+                    await conn.execute(
+                        "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"
+                    )
+                else:
+                    # Older pgvector filters after the index scan and can return too few rows;
+                    # fall back to exact search for filtered queries.
+                    await conn.execute("SELECT set_config('enable_indexscan', 'off', true)")
+            return await (await conn.execute(query, [list(queries), *params, n])).fetchall()
+
     async def query(
         self, coll, query_embeddings, n_results, ids, where, where_document, include
     ) -> dict:
@@ -787,54 +834,25 @@ class Store:
                 f"Collection expecting embedding with dimension of {coll.dimension}, got {query_embeddings.shape[1]}"
             )
         groups: list[list[tuple]] = [[] for _ in range(nq)]
-        cols = self._select_columns(include, prefix="r.")
         if coll.dimension is not None:
             cond, params = self._filters(ids, where, where_document)
-            op, dist = _SPACE_SQL[coll.space]
-            dist_sql = dist.format(q="q.v")
-            plan = index_plan(coll.dimension, coll.space, self.info)
-            order_sql = plan.order_by("q.v") if plan else f"embedding {op} q.v"
             filtered = bool(where) or bool(where_document) or ids is not None
-            inner_cols = self._select_columns(include)
-            query = sql.SQL(
-                "SELECT q.ord, r.id, r.distance{extra} FROM unnest(%s::vector[]) WITH ORDINALITY AS q(v, ord) "
-                "CROSS JOIN LATERAL (SELECT id, seq, {dist} AS distance{inner} FROM {t} WHERE {c} "
-                "ORDER BY {order}, seq LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
-            ).format(
-                extra=sql.SQL("".join(", " + c for c in cols)),
-                dist=sql.SQL(dist_sql),
-                inner=sql.SQL("".join(", " + c for c in inner_cols)),
-                t=coll.table,
-                c=cond,
-                order=sql.SQL(order_sql),
+            rows = await self.knn(
+                coll,
+                query_embeddings,
+                n_results,
+                cond,
+                params,
+                filtered,
+                self._select_columns(include),
             )
-            ef_search = int(coll.configuration.get("hnsw", {}).get("ef_search", 100))
-            async with self._tx() as conn:
-                # ef_search must cover n_results or HNSW returns fewer rows (max 1000).
-                await conn.execute(
-                    "SELECT set_config('hnsw.ef_search', %s, true)",
-                    (str(min(1000, max(ef_search, n_results))),),
-                )
-                if filtered:
-                    if self.info.has_iterative_scan:
-                        # pgvector 0.8: keep scanning the index until enough rows pass the filter.
-                        await conn.execute(
-                            "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"
-                        )
-                    else:
-                        # Older pgvector filters after the index scan and can return too few
-                        # rows; fall back to exact search for filtered queries.
-                        await conn.execute("SELECT set_config('enable_indexscan', 'off', true)")
-                rows = await (
-                    await conn.execute(query, [list(query_embeddings), *params, n_results])
-                ).fetchall()
             for row in rows:
                 groups[row[0] - 1].append(row)
         result: dict[str, Any] = {"ids": [[r[1] for r in g] for g in groups]}
         result["distances"] = (
             [[float(r[2]) for r in g] for g in groups] if "distances" in include else None
         )
-        pos = 3
+        pos = 4
         for item in ("embeddings", "documents", "metadatas", "uris"):
             if item in include:
                 result[item] = [
