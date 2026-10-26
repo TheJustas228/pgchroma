@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: `pgchroma migrate` / `verify` reported a false failure ("check the collection's distance
+  space") for collections with duplicate documents. Results that are as near as the exact k-th
+  neighbour now count as exact.
+- Changed: finished migration progress bars show the elapsed time instead of `0:00:00` remaining.
+- Docs: README banner, demo recording, architecture diagram and benchmark chart
+  (`docs/assets/render.py` regenerates them).
+
 ## 0.1.0 (2026-10-26)
 
 First release.

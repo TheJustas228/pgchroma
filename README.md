@@ -1,6 +1,7 @@
-# pgchroma
-
-**Chroma's API. Your Postgres.**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="pgchroma: Chroma's API. Your Postgres." src="docs/assets/banner-light.svg" width="100%">
+</picture>
 
 pgchroma is a server that speaks [Chroma](https://www.trychroma.com/)'s HTTP API and keeps every
 collection in Postgres with [pgvector](https://github.com/pgvector/pgvector). Point your existing
@@ -18,6 +19,12 @@ Supabase, Neon, RDS, Cloud SQL, Railway, or the Postgres on your laptop.
 > your collections into Postgres, verifies them, and your code keeps working with a one-line
 > change. [Jump to the migration guide.](#move-off-chroma-cloud-in-three-commands)
 
+<img alt="Terminal recording: pgchroma migrate copies three collections (16,200 records) from a Chroma server into Postgres and verifies them, then pgchroma serve answers a query from unchanged chromadb code" src="docs/assets/demo.gif" width="100%">
+
+<sub>A real run: three collections copied from a local Chroma 1.5.9 server and queried through
+pgchroma with the stock <code>chromadb</code> client. <code>--from-cloud</code> does the same
+against Chroma Cloud.</sub>
+
 ```python
 import chromadb
 
@@ -28,12 +35,10 @@ docs = client.get_collection("docs")  # everything below is unchanged
 docs.query(query_texts=["how do refunds work?"], n_results=5, where={"lang": "en"})
 ```
 
-```mermaid
-flowchart LR
-    A["your app<br/>(chromadb client: Python, JS,<br/>LangChain, LlamaIndex…)"] -- "Chroma HTTP API" --> B["pgchroma serve<br/>(stateless)"]
-    B -- SQL --> C[("Postgres + pgvector")]
-    D["Chroma Cloud or<br/>any Chroma server"] -- "read-only" --> E["pgchroma migrate"] --> C
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img alt="Your app's chromadb client talks the Chroma HTTP API to pgchroma serve, which stores everything in Postgres + pgvector. pgchroma migrate reads from Chroma Cloud or a self-hosted Chroma and writes to the same Postgres." src="docs/assets/architecture-light.svg" width="100%">
+</picture>
 
 ## Why
 
@@ -108,34 +113,31 @@ uvx --from git+https://github.com/TheJustas228/pgchroma pgchroma serve --databas
 # 3. swap CloudClient for HttpClient in your app (the migrate output prints the exact line)
 ```
 
-A real run, copying three collections from a local Chroma 1.5.9 server. The vectors are random,
-which is the worst case for approximate search; that is why Chroma's own HNSW index finds only
-63% of the exact top-10 neighbours of the largest collection, and why that is a warning, not a
-failure.
+The run in the recording above, as text (three collections, real embeddings from Chroma's
+default model):
 
 ```text
-Source: http://127.0.0.1:51365 tenant default_tenant
-support-tickets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12000/12000 0:00:00
+Source: http://localhost:8001 tenant default_tenant
 user-memories   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 800/800     0:00:00
-product-docs    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3400/3400   0:00:00
+support-tickets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12000/12000 0:00:03
+product-docs    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3400/3400   0:00:01
 Migrated
 ┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┓
 ┃ collection      ┃ from database    ┃ to database      ┃ records ┃ seconds ┃ index ┃ resumed ┃
 ┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━┩
-│ support-tickets │ default_database │ default_database │  12,000 │     7.7 │  hnsw │         │
-│ user-memories   │ default_database │ default_database │     800 │     0.5 │ exact │         │
-│ product-docs    │ default_database │ default_database │   3,400 │     1.4 │ exact │         │
+│ user-memories   │ default_database │ default_database │     800 │     0.4 │ exact │         │
+│ support-tickets │ default_database │ default_database │  12,000 │     5.1 │  hnsw │         │
+│ product-docs    │ default_database │ default_database │   3,400 │     1.3 │ exact │         │
 └─────────────────┴──────────────────┴──────────────────┴─────────┴─────────┴───────┴─────────┘
-Copied 16,200 records in 7.8s.
+Copied 16,200 records in 5.1s.
 Verification
 ┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━┓
 ┃ collection      ┃ source ┃ target ┃ sampled ┃ differ ┃ top-k vs exact ┃
 ┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ support-tickets │  12000 │  12000 │      48 │      0 │            63% │
 │ user-memories   │    800 │    800 │      48 │      0 │           100% │
-│ product-docs    │   3400 │   3400 │      48 │      0 │            95% │
+│ support-tickets │  12000 │  12000 │      48 │      0 │           100% │
+│ product-docs    │   3400 │   3400 │      48 │      0 │           100% │
 └─────────────────┴────────┴────────┴─────────┴────────┴────────────────┘
-! support-tickets: the source's top-10 results agree 63% with exact search; this is normal for an approximate (HNSW/SPANN) source index
 ✔ Verified: counts match and every sampled record is identical.
 
 Next: start the server (pgchroma serve) and point your client at it:
@@ -149,7 +151,9 @@ Details that matter:
 - **Resumable.** Progress is checkpointed per batch in Postgres. If the network drops, run the
   same command again; it continues where it stopped and never duplicates records.
 - **Verified.** Counts, a random sample of records (ids, embeddings, documents, metadata, uris)
-  and query parity against exact search are checked for every collection.
+  and query parity against exact search are checked for every collection. A source that uses an
+  approximate index (Chroma's HNSW or SPANN) may miss a few true neighbours on large
+  collections; below 90% agreement is reported as a warning, below 50% as a failure.
   `pgchroma verify` re-runs the checks later.
 - **Where things land.** Collections keep their names, metadata and configuration. They go into
   tenant `default_tenant` and a database with the same name as in Chroma Cloud. Change that
@@ -221,6 +225,11 @@ push (the core suite also runs on Postgres 15).
 batches of 1,000, 200 queries, `n_results=10`. One machine (16 cores, WSL2), Chroma 1.5.9 vs
 pgchroma on Postgres 16 + pgvector 0.6.2 with default settings. A sanity check, not a
 leaderboard.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-dark.svg">
+  <img alt="Bar charts, pgchroma vs Chroma 1.5.9: ingest 12,497 vs 1,274 records/s; filtered query p50 11.4 vs 37.2 ms; get(where) p50 3.9 vs 11.3 ms; query p50 7.6 vs 5.3 ms (Chroma is faster here)" src="docs/assets/benchmark-light.svg" width="100%">
+</picture>
 
 | | ingest | query p50 | filtered query p50 | `get(where=...)` p50 |
 |---|---:|---:|---:|---:|

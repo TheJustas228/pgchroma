@@ -179,7 +179,7 @@ async def _migrate(args) -> int:
                 TextColumn("[bold]{task.description}"),
                 BarColumn(),
                 MofNCompleteColumn(),
-                TimeRemainingColumn(),
+                TimeRemainingColumn(elapsed_when_finished=True),
                 console=console,
                 transient=False,
             ) as bar:
