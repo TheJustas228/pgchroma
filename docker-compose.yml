@@ -13,6 +13,7 @@ services:
       retries: 30
 
   pgchroma:
+    image: ghcr.io/thejustas228/pgchroma:latest
     build: .
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres

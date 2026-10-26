@@ -62,6 +62,12 @@ git clone https://github.com/TheJustas228/pgchroma && cd pgchroma
 docker compose up
 ```
 
+**With Docker, against your own Postgres:**
+
+```bash
+docker run -p 8000:8000 -e DATABASE_URL="postgresql://user:pass@host:5432/db" ghcr.io/thejustas228/pgchroma
+```
+
 **Against your own Postgres** (Python 3.10+, [uv](https://docs.astral.sh/uv/)):
 
 ```bash
@@ -249,9 +255,8 @@ pgchroma is a stateless web app. Give it `DATABASE_URL` and a port.
 | `--workers` | `1` | worker processes |
 | `PGCHROMA_MAINTENANCE_WORK_MEM` | `1GB` | memory for index builds (session setting) |
 
-- **Docker:** `docker build -t pgchroma . && docker run -e DATABASE_URL=... -p 8000:8000 pgchroma`.
-  The image listens on `$PORT`, so it runs as-is on Railway, Render, Fly.io, Cloud Run and
-  similar platforms.
+- **Docker:** `ghcr.io/thejustas228/pgchroma` (amd64 and arm64). The image listens on `$PORT`,
+  so it runs as-is on Railway, Render, Fly.io, Cloud Run and similar platforms.
 - **Supabase:** enable the `vector` extension and use the direct connection or the *session*
   pooler (port 5432). The transaction pooler (port 6543) is not supported: background index
   builds rely on session-level settings and advisory locks.
