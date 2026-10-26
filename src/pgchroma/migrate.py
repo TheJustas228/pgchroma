@@ -362,6 +362,40 @@ def _same_record(src: dict, dst: dict, i: int, j: int) -> list[str]:
     return problems
 
 
+def _distance(space: str, q: np.ndarray, e: np.ndarray) -> float:
+    q, e = q.astype(np.float64), e.astype(np.float64)
+    if space == "cosine":
+        return 1.0 - float(q @ e) / max(float(np.linalg.norm(q) * np.linalg.norm(e)), 1e-30)
+    if space == "ip":
+        return 1.0 - float(q @ e)
+    return float(((q - e) ** 2).sum())
+
+
+async def _query_overlap(store: Store, ref, queries: np.ndarray, theirs: list, ours: dict) -> float:
+    """Share of the source's results that are exact nearest neighbours.
+
+    A result counts when pgchroma's exact search returned it, or when it is no farther from the
+    query than pgchroma's k-th neighbour: duplicates and other ties may come back in any order.
+    """
+    others = sorted({i for t, o in zip(theirs, ours["ids"], strict=True) for i in set(t) - set(o)})
+    found = {}
+    if others:
+        got = await store.get(ref, others, None, None, None, None, ["embeddings"])
+        found = dict(zip(got["ids"], got["embeddings"], strict=True))
+    overlaps = []
+    for qv, t, o, dists in zip(queries, theirs, ours["ids"], ours["distances"], strict=True):
+        kth = max(dists) if dists else 0.0
+        tol = 1e-4 * max(1.0, abs(kth)) + 1e-6
+        mine = set(o)
+        hits = sum(
+            1
+            for i in t
+            if i in mine or (i in found and _distance(ref.space, qv, found[i]) <= kth + tol)
+        )
+        overlaps.append(hits / max(1, len(t)))
+    return float(np.mean(overlaps))
+
+
 async def verify(
     source: ChromaSource,
     store: Store,
@@ -435,14 +469,9 @@ async def verify(
             theirs = await source.query(db, coll["id"], queries, n)
             # Compare with pgchroma's exact search: the source may use an approximate index, and
             # comparing two approximate answers would understate agreement.
-            ours = await store.query(
-                ref, np.asarray(queries, dtype=np.float32), n, None, None, None, [], exact=True
-            )
-            overlaps = [
-                len(set(a) & set(b)) / max(1, len(a))
-                for a, b in zip(theirs["ids"], ours["ids"], strict=True)
-            ]
-            check.query_overlap = float(np.mean(overlaps))
+            q = np.asarray(queries, dtype=np.float32)
+            ours = await store.query(ref, q, n, None, None, None, ["distances"], exact=True)
+            check.query_overlap = await _query_overlap(store, ref, q, theirs["ids"], ours)
             if check.query_overlap < 0.5:
                 report.problems.append(
                     f"{name}: only {check.query_overlap:.0%} of the source's top-{n} results are the "

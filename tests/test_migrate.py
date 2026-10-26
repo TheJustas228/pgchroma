@@ -155,6 +155,39 @@ async def test_verify_grades_query_overlap(real_chroma, store, keep, ok, warned)
     assert bool(check.warnings) is warned
 
 
+class TiedSource(ChromaSource):
+    """Answers queries with other copies of the same embedding: equally near, different ids."""
+
+    copies = 30
+
+    async def query(self, database, collection_id, embeddings, n_results):
+        r = await super().query(database, collection_id, embeddings, n_results)
+        groups = [ids[0].split("-")[1] for ids in r["ids"]]
+        r["ids"] = [[f"dup-{g}-{self.copies - 1 - j}" for j in range(n_results)] for g in groups]
+        return r
+
+
+async def test_verify_counts_equally_near_duplicates_as_exact(real_chroma, store):
+    from harness import make_client
+
+    rng = np.random.default_rng(5)
+    vectors = rng.normal(size=(4, 16)).astype(np.float32)
+    c = make_client(real_chroma.url).create_collection(
+        "dups", configuration={"hnsw": {"space": "cosine"}}, embedding_function=None
+    )
+    c.add(
+        ids=[f"dup-{g}-{j}" for g in range(4) for j in range(TiedSource.copies)],
+        embeddings=np.repeat(vectors, TiedSource.copies, axis=0),
+    )
+    async with ChromaSource(real_chroma.url) as src:
+        await migrate(src, store, collections=["dups"])
+    async with TiedSource(real_chroma.url) as src:
+        check = await verify(src, store, collections=["dups"], sample=20, k=10)
+    assert check.ok, check.problems
+    assert not check.warnings
+    assert check.collections[0].query_overlap == 1.0
+
+
 async def test_migrate_builds_indexes_for_large_collections(real_chroma, pool):
     seed_source(real_chroma.url)
     store = Store(pool, pool.pgchroma_info, index_threshold=200)
