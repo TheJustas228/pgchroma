@@ -362,6 +362,11 @@ class Store:
                 "embedding vector, document text, metadata jsonb, uri text)"
             ).format(t)
         )
+        await self._create_indexes(conn, collection_id)
+
+    async def _create_indexes(self, conn, collection_id: uuid.UUID) -> None:
+        """Indexes every collection table has; the HNSW index is built later, on demand."""
+        t = table_ident(collection_id)
         await conn.execute(sql.SQL("CREATE INDEX ON {} (seq)").format(t))
         await conn.execute(
             sql.SQL("CREATE INDEX ON {} USING gin (metadata jsonb_path_ops)").format(t)
@@ -532,11 +537,17 @@ class Store:
             )
             if cur.rowcount == 0:
                 raise DuplicateError(f"Collection [{new_name}] already exists")
+            # Copy columns and the identity, not indexes: the source's HNSW index would come
+            # along under another name, and the fork gets its own when searches need it.
             await conn.execute(
-                sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(
+                sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING DEFAULTS INCLUDING IDENTITY)").format(
                     table_ident(new_id), src.table
                 )
             )
+            await conn.execute(
+                sql.SQL("ALTER TABLE {} ADD PRIMARY KEY (id)").format(table_ident(new_id))
+            )
+            await self._create_indexes(conn, new_id)
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {} (id, embedding, document, metadata, uri) "
@@ -560,6 +571,10 @@ class Store:
 
     async def _fix_dimension(self, conn, coll: CollectionRef, dim: int) -> None:
         """Validate `dim`; the first write of a collection fixes its dimension and column type."""
+        if dim > 16000:
+            raise InvalidArgumentError(
+                f"Embeddings can have at most 16000 dimensions (pgvector's limit), got {dim}"
+            )
         if coll.dimension is None:
             row = await (
                 await conn.execute(
@@ -903,9 +918,11 @@ class Store:
             #   (iterative scans); older pgvector would return too few rows, so they run exact.
             settings = ["set_config('hnsw.ef_search', %s, true)"]
             values = [str(min(1000, max(ef_search, n)))]
-            if exact or (filtered and not self.info.has_iterative_scan):
+            # More results than ef_search can hold (1000) need the same treatment as filters.
+            partial = filtered or n > 1000
+            if exact or (partial and not self.info.has_iterative_scan):
                 settings.append("set_config('enable_indexscan', 'off', true)")
-            elif filtered:
+            elif partial:
                 settings.append("set_config('hnsw.iterative_scan', 'relaxed_order', true)")
             await conn.execute("SELECT " + ", ".join(settings), values)
             return await (await conn.execute(query, [list(queries), *params, n])).fetchall()

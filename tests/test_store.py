@@ -333,3 +333,9 @@ async def test_collection_cache_is_invalidated_by_local_changes(store):
 async def test_collections_without_dimension_are_never_cached(store):
     c = await make(store)
     assert (await store.collection(T, D, c.id)) is not (await store.collection(T, D, c.id))
+
+
+async def test_too_many_dimensions_is_an_invalid_argument(store):
+    c = await make(store)
+    with pytest.raises(InvalidArgumentError, match="16000"):
+        await store.add(c, ["big"], np.zeros((1, 16001), dtype=np.float32), None, None, None)

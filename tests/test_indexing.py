@@ -141,3 +141,28 @@ class _Fixed:
 
     async def __aexit__(self, *exc):
         return False
+
+
+async def test_large_n_results_on_indexed_collection(store):
+    c = await make(store)
+    vecs = np.random.default_rng(7).random((1600, 8), dtype=np.float32)
+    await store.add(c, [f"n{i}" for i in range(1600)], vecs, None, None, None)
+    await store.build_index(c)
+    r = await store.query(c, vecs[:1], 1500, None, None, None, ["distances"])
+    assert len(r["ids"][0]) == 1500
+    assert r["distances"][0] == sorted(r["distances"][0])
+
+
+async def test_fork_of_indexed_collection_gets_exactly_one_hnsw_index(store):
+    c = await make(store)
+    vecs = np.random.default_rng(8).random((120, 8), dtype=np.float32)
+    await store.add(c, [f"f{i}" for i in range(120)], vecs, None, None, None)
+    await store.build_index(c)
+    forked = await store.fork_collection(
+        "default_tenant", "default_database", str(c.id), "docs-fork"
+    )
+    fc = await store.collection("default_tenant", "default_database", forked["id"])
+    await store.build_index(fc)
+    assert len(await hnsw_indexes(store, fc)) == 1
+    r = await store.query(fc, vecs[:1], 3, None, None, None, [])
+    assert r["ids"][0][0] == "f0"
