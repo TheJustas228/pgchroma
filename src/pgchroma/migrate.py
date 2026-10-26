@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 
-from .config import default_schema, normalize_configuration
 from .errors import DuplicateError, NotFoundError
 from .source import ChromaSource, SourceError
 from .store import CollectionRef, Store
@@ -96,34 +95,98 @@ LOCAL_QWEN = {
 }
 
 
-def localize_embedding_function(configuration: dict | None) -> tuple[dict | None, str | None]:
-    """Swap Chroma Cloud's hosted Qwen embedding function for the same open model run locally.
+LOCAL_SPLADE = {
+    "type": "known",
+    "name": "huggingface_sparse",
+    "config": {
+        "model_name": "prithivida/Splade_PP_en_v1",
+        "device": "cpu",
+        # Chroma Cloud encodes queries and documents the same way.
+        "task": "document",
+        "query_config": {"task": "document"},
+        "kwargs": {},
+    },
+}
+_LOCAL = {
+    "chroma-cloud-qwen": LOCAL_QWEN,
+    "chroma_cloud_qwen": LOCAL_QWEN,
+    "chroma-cloud-splade": LOCAL_SPLADE,
+    "chroma_cloud_splade": LOCAL_SPLADE,
+}
 
-    `chroma-cloud-qwen` is Qwen/Qwen3-Embedding-0.6B (see chromadb's
-    ChromaCloudQwenEmbeddingFunction). Stored embeddings are untouched; this only changes what
-    the client uses for new documents and `query_texts`.
+
+def _embedding_functions(node: Any) -> list[dict]:
+    """Every embedding function config in a collection configuration or schema."""
+    if isinstance(node, list):
+        return [ef for item in node for ef in _embedding_functions(item)]
+    if not isinstance(node, dict):
+        return []
+    found = []
+    for key, value in node.items():
+        if key == "embedding_function" and isinstance(value, dict):
+            found.append(value)
+        else:
+            found.extend(_embedding_functions(value))
+    return found
+
+
+def _replace_hosted(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_replace_hosted(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for key, value in node.items():
+        if key == "embedding_function" and isinstance(value, dict) and value.get("name") in _LOCAL:
+            out[key] = copy.deepcopy(_LOCAL[value["name"]])
+        else:
+            out[key] = _replace_hosted(value)
+    return out
+
+
+def localize_embedding_functions(
+    configuration: dict | None, schema: dict | None
+) -> tuple[dict | None, dict | None, list[str]]:
+    """Swap Chroma Cloud's hosted embedding functions for the same open models run locally.
+
+    `chroma-cloud-qwen` is Qwen/Qwen3-Embedding-0.6B and `chroma-cloud-splade` is
+    prithivida/Splade_PP_en_v1 (see chromadb's ChromaCloud*EmbeddingFunction). Stored embeddings
+    are untouched; this only changes what the client uses for new documents and query text.
+    Returns the new configuration and schema, with a note for every function replaced.
     """
-    ef = (configuration or {}).get("embedding_function")
-    if not isinstance(ef, dict) or ef.get("name") not in ("chroma-cloud-qwen", "chroma_cloud_qwen"):
-        return configuration, None
-    new = {**configuration, "embedding_function": copy.deepcopy(LOCAL_QWEN)}
-    note = (
-        "embedding function chroma-cloud-qwen replaced with the same open model run locally "
-        "(Qwen/Qwen3-Embedding-0.6B via sentence-transformers; `pip install sentence-transformers`)"
-    )
-    task = (ef.get("config") or {}).get("task")
-    if task:
-        note += (
-            f". Its queries used the '{task}' instruction: use the embedding function in "
-            "examples/local_qwen_embeddings.py to reproduce query embeddings exactly"
+    hosted = {
+        ef["name"].replace("_", "-"): ef
+        for ef in _embedding_functions(configuration) + _embedding_functions(schema)
+        if ef.get("name") in _LOCAL
+    }
+    notes = []
+    if qwen := hosted.get("chroma-cloud-qwen"):
+        note = (
+            "embedding function chroma-cloud-qwen replaced with the same open model run locally "
+            "(Qwen/Qwen3-Embedding-0.6B via sentence-transformers; `pip install sentence-transformers`)"
         )
-    return new, note
+        if task := (qwen.get("config") or {}).get("task"):
+            note += (
+                f". Its queries used the '{task}' instruction: use the embedding function in "
+                "examples/local_qwen_embeddings.py to reproduce query embeddings exactly"
+            )
+        notes.append(note)
+    if "chroma-cloud-splade" in hosted:
+        notes.append(
+            "sparse embedding function chroma-cloud-splade replaced with the same open model run "
+            "locally (prithivida/Splade_PP_en_v1 via sentence-transformers; "
+            "`pip install sentence-transformers`)"
+        )
+    if not notes:
+        return configuration, schema, []
+    return _replace_hosted(configuration), _replace_hosted(schema), notes
 
 
-def hosted_embedding_function(collection: dict) -> str | None:
-    ef = (collection.get("configuration_json") or {}).get("embedding_function") or {}
-    name = ef.get("name") if isinstance(ef, dict) else None
-    return name if name in HOSTED_EMBEDDING_FUNCTIONS else None
+def hosted_embedding_functions(collection: dict) -> list[str]:
+    efs = _embedding_functions(collection.get("configuration_json")) + _embedding_functions(
+        collection.get("schema")
+    )
+    return sorted({ef["name"] for ef in efs if ef.get("name") in HOSTED_EMBEDDING_FUNCTIONS})
 
 
 async def _checkpoint(
@@ -183,8 +246,8 @@ async def _target_collection(
         to_db,
         coll["name"],
         coll.get("metadata"),
-        configuration if configuration is not None else coll.get("configuration_json"),
-        schema if configuration is not None else coll.get("schema"),
+        coll.get("configuration_json") if configuration is None else configuration,
+        coll.get("schema") if schema is None else schema,
         False,
     )
     ref = await store.collection(to_tenant, to_db, created["id"])
@@ -207,20 +270,17 @@ async def _copy_collection(
 ) -> CollectionReport:
     started = time.monotonic()
     report = CollectionReport(coll["name"], database, to_db)
-    configuration = schema = None
+    configuration, schema = coll.get("configuration_json"), coll.get("schema")
+    notes = []
     if local_embedding_functions:
-        configuration, note = localize_embedding_function(coll.get("configuration_json"))
-        if note:
-            # The source schema embeds the old function too; derive a fresh one from the new config.
-            schema = default_schema(normalize_configuration(configuration, coll.get("metadata")))
-            report.warnings.append(note)
-        else:
-            configuration = None
-    if configuration is None and (ef := hosted_embedding_function(coll)) is not None:
-        report.warnings.append(
-            f"uses the Chroma-hosted embedding function '{ef}', which stops working with Chroma Cloud; "
-            "rerun with --local-embedding-functions or see the README"
-        )
+        configuration, schema, notes = localize_embedding_functions(configuration, schema)
+        report.warnings.extend(notes)
+    if not notes:
+        for ef in hosted_embedding_functions(coll):
+            report.warnings.append(
+                f"uses the Chroma-hosted embedding function '{ef}', which stops working with "
+                "Chroma Cloud; rerun with --local-embedding-functions or see the README"
+            )
     key = _source_key(source, tenant, database, coll["id"])
     ref, offset, report.resumed = await _target_collection(
         store, source, key, coll, to_tenant, to_db, configuration, schema

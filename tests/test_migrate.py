@@ -200,19 +200,53 @@ async def test_migrate_builds_indexes_for_large_collections(real_chroma, pool):
         assert await store.indexing_progress(ref) == 1.0
 
 
-def test_localize_embedding_function():
-    from pgchroma.migrate import localize_embedding_function
+QWEN = {
+    "type": "known",
+    "name": "chroma-cloud-qwen",
+    "config": {"model": "Qwen/Qwen3-Embedding-0.6B", "task": None},
+}
+SPLADE = {
+    "type": "known",
+    "name": "chroma-cloud-splade",
+    "config": {"model": "prithivida/Splade_PP_en_v1", "include_tokens": False},
+}
+SPLADE_SCHEMA = {
+    "defaults": {},
+    "keys": {
+        "splade": {
+            "sparse_vector": {
+                "sparse_vector_index": {
+                    "enabled": True,
+                    "config": {"embedding_function": SPLADE, "source_key": "#document"},
+                }
+            }
+        }
+    },
+}
 
-    cfg = {
-        "hnsw": {"space": "cosine"},
-        "embedding_function": {
-            "type": "known",
-            "name": "chroma-cloud-qwen",
-            "config": {"model": "Qwen/Qwen3-Embedding-0.6B", "task": None},
-        },
+
+def test_localize_embedding_functions():
+    import copy
+
+    from pgchroma.migrate import localize_embedding_functions
+
+    cfg = {"hnsw": {"space": "cosine"}, "embedding_function": QWEN}
+    schema = copy.deepcopy(SPLADE_SCHEMA)
+    schema["keys"]["#embedding"] = {
+        "float_list": {
+            "vector_index": {
+                "enabled": True,
+                "config": {
+                    "space": "cosine",
+                    "embedding_function": QWEN,
+                    "source_key": "#document",
+                },
+            }
+        }
     }
-    new, note = localize_embedding_function(cfg)
-    assert new["embedding_function"] == {
+    before = copy.deepcopy(schema)
+    new_cfg, new_schema, notes = localize_embedding_functions(cfg, schema)
+    assert new_cfg["embedding_function"] == {
         "type": "known",
         "name": "sentence_transformer",
         "config": {
@@ -222,19 +256,68 @@ def test_localize_embedding_function():
             "kwargs": {"model_kwargs": {"torch_dtype": "float32"}},
         },
     }
-    assert new["hnsw"] == {"space": "cosine"} and "sentence-transformers" in note
+    assert new_cfg["hnsw"] == {"space": "cosine"}
+    vector = new_schema["keys"]["#embedding"]["float_list"]["vector_index"]["config"]
+    assert vector["embedding_function"] == new_cfg["embedding_function"]
+    assert vector["space"] == "cosine"
+    sparse = new_schema["keys"]["splade"]["sparse_vector"]["sparse_vector_index"]["config"]
+    assert sparse == {
+        "embedding_function": {
+            "type": "known",
+            "name": "huggingface_sparse",
+            "config": {
+                "model_name": "prithivida/Splade_PP_en_v1",
+                "device": "cpu",
+                "task": "document",
+                "query_config": {"task": "document"},
+                "kwargs": {},
+            },
+        },
+        "source_key": "#document",
+    }
+    assert schema == before  # inputs are not modified
+    assert len(notes) == 2
+    assert "Qwen/Qwen3-Embedding-0.6B" in notes[0] and "sentence-transformers" in notes[0]
+    assert "prithivida/Splade_PP_en_v1" in notes[1]
 
-    cfg["embedding_function"]["config"]["task"] = "nl_to_code"
-    new, note = localize_embedding_function(cfg)
-    assert new["embedding_function"]["name"] == "sentence_transformer"
-    assert "nl_to_code" in note and "examples/local_qwen_embeddings.py" in note
+    task = {"embedding_function": {**QWEN, "config": {**QWEN["config"], "task": "nl_to_code"}}}
+    _, _, notes = localize_embedding_functions(task, None)
+    assert "nl_to_code" in notes[0] and "examples/local_qwen_embeddings.py" in notes[0]
 
-    splade = {"embedding_function": {"type": "known", "name": "chroma-cloud-splade", "config": {}}}
-    assert localize_embedding_function(splade)[0] == splade
-    assert localize_embedding_function({"embedding_function": None}) == (
-        {"embedding_function": None},
-        None,
-    )
+    plain = {"embedding_function": None}
+    assert localize_embedding_functions(plain, None) == (plain, None, [])
+
+
+class CloudSchemaSource(ChromaSource):
+    """Lists collections the way Chroma Cloud does for one with a hosted SPLADE index
+    (single-node Chroma refuses sparse indexes)."""
+
+    async def collections(self, database):
+        import copy
+
+        out = await super().collections(database)
+        for c in out:
+            c["schema"] = copy.deepcopy(SPLADE_SCHEMA)
+        return out
+
+
+async def test_migrate_localizes_hosted_sparse_embedding_function(real_chroma, store):
+    from harness import make_client
+
+    c = make_client(real_chroma.url).create_collection("hybrid", embedding_function=None)
+    c.add(ids=["x"], embeddings=[[1.0, 0.0]], documents=["hello"])
+    async with CloudSchemaSource(real_chroma.url) as src:
+        report = await migrate(src, store, collections=["hybrid"])
+    assert any("chroma-cloud-splade" in w for w in report.collections[0].warnings)
+    async with CloudSchemaSource(real_chroma.url) as src:
+        report = await migrate(
+            src, store, collections=["hybrid"], to_database="local", local_embedding_functions=True
+        )
+    assert any("prithivida/Splade_PP_en_v1" in w for w in report.collections[0].warnings)
+    got = await store.get_collection(T, "local", "hybrid")
+    index = got["schema"]["keys"]["splade"]["sparse_vector"]["sparse_vector_index"]
+    assert index["config"]["embedding_function"]["name"] == "huggingface_sparse"
+    assert index["config"]["source_key"] == "#document"
 
 
 async def test_migrate_rewrites_hosted_embedding_function_on_request(real_chroma, store):
