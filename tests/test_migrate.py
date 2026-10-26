@@ -165,3 +165,66 @@ async def test_migrate_builds_indexes_for_large_collections(real_chroma, pool):
     for name in ("articles", "products"):
         ref = await store.collection(T, D, (await store.get_collection(T, D, name))["id"])
         assert await store.indexing_progress(ref) == 1.0
+
+
+def test_localize_embedding_function():
+    from pgchroma.migrate import localize_embedding_function
+
+    cfg = {
+        "hnsw": {"space": "cosine"},
+        "embedding_function": {
+            "type": "known",
+            "name": "chroma-cloud-qwen",
+            "config": {"model": "Qwen/Qwen3-Embedding-0.6B", "task": None},
+        },
+    }
+    new, note = localize_embedding_function(cfg)
+    assert new["embedding_function"] == {
+        "type": "known",
+        "name": "sentence_transformer",
+        "config": {
+            "model_name": "Qwen/Qwen3-Embedding-0.6B",
+            "device": "cpu",
+            "normalize_embeddings": True,
+            "kwargs": {"model_kwargs": {"torch_dtype": "float32"}},
+        },
+    }
+    assert new["hnsw"] == {"space": "cosine"} and "sentence-transformers" in note
+
+    cfg["embedding_function"]["config"]["task"] = "nl_to_code"
+    new, note = localize_embedding_function(cfg)
+    assert new["embedding_function"]["name"] == "sentence_transformer"
+    assert "nl_to_code" in note and "examples/local_qwen_embeddings.py" in note
+
+    splade = {"embedding_function": {"type": "known", "name": "chroma-cloud-splade", "config": {}}}
+    assert localize_embedding_function(splade)[0] == splade
+    assert localize_embedding_function({"embedding_function": None}) == (
+        {"embedding_function": None},
+        None,
+    )
+
+
+async def test_migrate_rewrites_hosted_embedding_function_on_request(real_chroma, store):
+    import httpx
+
+    ef = {
+        "type": "known",
+        "name": "chroma-cloud-qwen",
+        "config": {"model": "Qwen/Qwen3-Embedding-0.6B", "task": None},
+    }
+    base = f"{real_chroma.url}/api/v2/tenants/default_tenant/databases/default_database/collections"
+    r = httpx.post(
+        base,
+        json={
+            "name": "cloudy",
+            "configuration": {"hnsw": {"space": "cosine"}, "embedding_function": ef},
+        },
+    )
+    assert r.status_code == 200, r.text
+    httpx.post(f"{base}/{r.json()['id']}/add", json={"ids": ["x"], "embeddings": [[1.0, 0.0]]})
+    async with ChromaSource(real_chroma.url) as src:
+        report = await migrate(src, store, collections=["cloudy"], local_embedding_functions=True)
+    got = await store.get_collection(T, D, "cloudy")
+    assert got["configuration_json"]["embedding_function"]["name"] == "sentence_transformer"
+    assert got["configuration_json"]["hnsw"]["space"] == "cosine"
+    assert any("Qwen/Qwen3-Embedding-0.6B" in w for w in report.collections[0].warnings)

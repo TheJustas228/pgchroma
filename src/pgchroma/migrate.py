@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import random
 import time
 from collections.abc import Callable
@@ -12,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from .config import default_schema, normalize_configuration
 from .errors import DuplicateError, NotFoundError
 from .source import ChromaSource, SourceError
 from .store import CollectionRef, Store
@@ -82,6 +84,42 @@ def _clean_metadata(m: Any) -> Any:
     return None if m == {} else m
 
 
+LOCAL_QWEN = {
+    "type": "known",
+    "name": "sentence_transformer",
+    "config": {
+        "model_name": "Qwen/Qwen3-Embedding-0.6B",
+        "device": "cpu",
+        "normalize_embeddings": True,
+        "kwargs": {"model_kwargs": {"torch_dtype": "float32"}},
+    },
+}
+
+
+def localize_embedding_function(configuration: dict | None) -> tuple[dict | None, str | None]:
+    """Swap Chroma Cloud's hosted Qwen embedding function for the same open model run locally.
+
+    `chroma-cloud-qwen` is Qwen/Qwen3-Embedding-0.6B (see chromadb's
+    ChromaCloudQwenEmbeddingFunction). Stored embeddings are untouched; this only changes what
+    the client uses for new documents and `query_texts`.
+    """
+    ef = (configuration or {}).get("embedding_function")
+    if not isinstance(ef, dict) or ef.get("name") not in ("chroma-cloud-qwen", "chroma_cloud_qwen"):
+        return configuration, None
+    new = {**configuration, "embedding_function": copy.deepcopy(LOCAL_QWEN)}
+    note = (
+        "embedding function chroma-cloud-qwen replaced with the same open model run locally "
+        "(Qwen/Qwen3-Embedding-0.6B via sentence-transformers; `pip install sentence-transformers`)"
+    )
+    task = (ef.get("config") or {}).get("task")
+    if task:
+        note += (
+            f". Its queries used the '{task}' instruction: use the embedding function in "
+            "examples/local_qwen_embeddings.py to reproduce query embeddings exactly"
+        )
+    return new, note
+
+
 def hosted_embedding_function(collection: dict) -> str | None:
     ef = (collection.get("configuration_json") or {}).get("embedding_function") or {}
     name = ef.get("name") if isinstance(ef, dict) else None
@@ -117,7 +155,14 @@ async def _ensure_target(store: Store, tenant: str, database: str) -> None:
 
 
 async def _target_collection(
-    store: Store, source: ChromaSource, key: str, coll: dict, to_tenant: str, to_db: str
+    store: Store,
+    source: ChromaSource,
+    key: str,
+    coll: dict,
+    to_tenant: str,
+    to_db: str,
+    configuration: dict | None = None,
+    schema: dict | None = None,
 ) -> tuple[CollectionRef, int, bool]:
     """Return (target collection, records already copied, resumed?)."""
     try:
@@ -138,8 +183,8 @@ async def _target_collection(
         to_db,
         coll["name"],
         coll.get("metadata"),
-        coll.get("configuration_json"),
-        coll.get("schema"),
+        configuration if configuration is not None else coll.get("configuration_json"),
+        schema if configuration is not None else coll.get("schema"),
         False,
     )
     ref = await store.collection(to_tenant, to_db, created["id"])
@@ -158,17 +203,27 @@ async def _copy_collection(
     batch_size: int,
     progress: Progress | None,
     build_indexes: bool = True,
+    local_embedding_functions: bool = False,
 ) -> CollectionReport:
     started = time.monotonic()
     report = CollectionReport(coll["name"], database, to_db)
-    if (ef := hosted_embedding_function(coll)) is not None:
+    configuration = schema = None
+    if local_embedding_functions:
+        configuration, note = localize_embedding_function(coll.get("configuration_json"))
+        if note:
+            # The source schema embeds the old function too; derive a fresh one from the new config.
+            schema = default_schema(normalize_configuration(configuration, coll.get("metadata")))
+            report.warnings.append(note)
+        else:
+            configuration = None
+    if configuration is None and (ef := hosted_embedding_function(coll)) is not None:
         report.warnings.append(
             f"uses the Chroma-hosted embedding function '{ef}', which stops working with Chroma Cloud; "
-            "see the README for the drop-in local replacement"
+            "rerun with --local-embedding-functions or see the README"
         )
     key = _source_key(source, tenant, database, coll["id"])
     ref, offset, report.resumed = await _target_collection(
-        store, source, key, coll, to_tenant, to_db
+        store, source, key, coll, to_tenant, to_db, configuration, schema
     )
     report.total = await source.count(database, coll["id"])
     size = batch_size
@@ -243,6 +298,7 @@ async def migrate(
     concurrency: int = 4,
     progress: Progress | None = None,
     build_indexes: bool = True,
+    local_embedding_functions: bool = False,
 ) -> MigrationReport:
     tenant = await source.resolve_tenant()
     jobs = await _jobs(source, databases, collections)
@@ -274,6 +330,7 @@ async def migrate(
                 batch_size,
                 progress,
                 build_indexes,
+                local_embedding_functions,
             )
 
     tasks = [asyncio.ensure_future(run(db, coll)) for db, coll in jobs]

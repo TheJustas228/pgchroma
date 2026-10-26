@@ -200,6 +200,7 @@ async def _migrate(args) -> int:
                     batch_size=args.batch_size,
                     concurrency=args.concurrency,
                     progress=progress,
+                    local_embedding_functions=args.local_embedding_functions,
                 )
             table = Table(title="Migrated", title_justify="left")
             for col in (
@@ -433,6 +434,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample", type=int, default=50, help="records per collection compared during verification"
     )
     m.add_argument("--no-verify", action="store_true", help="skip verification")
+    m.add_argument(
+        "--local-embedding-functions",
+        action="store_true",
+        help="replace Chroma Cloud's hosted chroma-cloud-qwen with the same open model run locally",
+    )
     m.set_defaults(fn=cmd_migrate)
 
     v = sub.add_parser("verify", help="compare pgchroma with the source again", epilog=ENV_HELP)
