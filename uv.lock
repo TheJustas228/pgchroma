@@ -1974,7 +1974,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "chromadb", marker = "python_full_version >= '3.11'" },
-    { name = "pgserver" },
+    { name = "pgserver", marker = "python_full_version < '3.13'" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1995,7 +1995,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "chromadb", marker = "python_full_version >= '3.11'", specifier = "==1.5.9" },
-    { name = "pgserver", specifier = ">=0.1.4" },
+    { name = "pgserver", marker = "python_full_version < '3.13'", specifier = ">=0.1.4" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.6" },
@@ -2006,10 +2006,10 @@ name = "pgserver"
 version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fasteners" },
+    { name = "fasteners", marker = "python_full_version < '3.13'" },
     { name = "platformdirs", version = "4.12.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "platformdirs", version = "4.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "psutil" },
+    { name = "platformdirs", version = "4.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.13'" },
+    { name = "psutil", marker = "python_full_version < '3.13'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/89/ae/476532eda309ecee1c6ebe7f99665b35f7082c841f9d9d144d42294d40a0/pgserver-0.1.4-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:79041d91d4d28e3a6a75dd472ee395e2da036ffd7f77cd826052697532291646", size = 10378170, upload-time = "2024-06-08T18:41:18.987Z" },
@@ -2052,8 +2052,6 @@ name = "platformdirs"
 version = "4.13.5"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version == '3.11.*'",
 ]

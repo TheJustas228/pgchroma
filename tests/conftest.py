@@ -14,7 +14,9 @@ def database_url():
     if url:
         yield url
         return
-    import pgserver
+    pgserver = pytest.importorskip(
+        "pgserver", reason="set DATABASE_URL to a Postgres with pgvector to run these tests"
+    )
 
     datadir = tempfile.mkdtemp(prefix="pgchroma-test-")
     server = pgserver.get_server(datadir, cleanup_mode="delete")
