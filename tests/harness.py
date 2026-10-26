@@ -43,18 +43,29 @@ class ChromaProcess:
             raise FileNotFoundError("chroma binary not found")
         self.port = free_port()
         self.dir = tempfile.mkdtemp(prefix="chroma-real-")
+        self.log_path = os.path.join(self.dir, "chroma.log")
+        self.log = open(self.log_path, "wb")  # noqa: SIM115 - closed in stop()
+        # Bind to 127.0.0.1 explicitly: "localhost" may resolve to ::1 (e.g. on CI runners).
         self.proc = subprocess.Popen(
-            [binary, "run", "--path", self.dir, "--port", str(self.port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            [binary, "run", "--path", self.dir, "--host", "127.0.0.1", "--port", str(self.port)],
+            stdout=self.log,
+            stderr=subprocess.STDOUT,
             env={**os.environ, "ANONYMIZED_TELEMETRY": "False"},
         )
         self.url = f"http://127.0.0.1:{self.port}"
-        wait_for(self.url)
+        try:
+            wait_for(self.url, timeout=20)
+        except RuntimeError as e:
+            self.proc.kill()
+            self.log.close()
+            with open(self.log_path, errors="replace") as f:
+                tail = f.read()[-3000:]
+            raise RuntimeError(f"{e}; exit code {self.proc.poll()}; output:\n{tail}") from None
 
     def stop(self) -> None:
         self.proc.terminate()
         self.proc.wait(timeout=10)
+        self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
