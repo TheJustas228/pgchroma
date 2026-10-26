@@ -49,6 +49,7 @@ dev = [
     "pgserver>=0.1.4; python_version < '3.13'",
     "chromadb==1.5.9; python_version >= '3.11'",
     "ruff>=0.6",
+    "snowballstemmer>=3.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]

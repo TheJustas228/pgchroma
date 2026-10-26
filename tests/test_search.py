@@ -135,6 +135,161 @@ def test_batch_of_searches(coll):
     assert r["ids"] == [["f"], ["e"]]
 
 
-def test_sparse_key_is_reported_as_unsupported(coll):
-    with pytest.raises(Exception, match="not supported"):
+# Sparse vectors live in metadata. Chroma scores them as 1 - query·document (lower is better);
+# only records sharing a dimension with the query are candidates. With bm25 the query weights
+# are scaled by ln(1 + (N - n_t + 0.5) / (n_t + 0.5)), N = records, n_t = records with dimension t.
+# (rust/worker/src/execution/operators/{sparse_log_knn,idf}.rs)
+
+SPARSE = {
+    "a": ([1, 4, 9], [0.5, 1.0, 2.0]),
+    "b": ([4], [3.0]),
+    "c": ([2, 9], [1.0, 0.25]),
+    "d": None,
+    "e": ([7], [5.0]),
+    "f": ([1, 2, 4], [1.0, 1.0, 0.1]),
+}
+
+
+def sparse_metadatas():
+    from chromadb import SparseVector
+
+    out = []
+    for rid, meta in zip(IDS, META, strict=True):
+        m = dict(meta)
+        if SPARSE[rid]:
+            m["sp"] = SparseVector(indices=SPARSE[rid][0], values=SPARSE[rid][1])
+        out.append(m)
+    return out
+
+
+def sparse_scores(q_idx, q_val, idf=False):
+    weights = dict(zip(q_idx, q_val, strict=True))
+    if idf:
+        n = len(IDS)
+        for t in weights:
+            nt = sum(1 for v in SPARSE.values() if v and t in v[0])
+            weights[t] *= np.log1p((n - nt + 0.5) / (nt + 0.5))
+    scores = {}
+    for rid in IDS:
+        if SPARSE[rid] and set(SPARSE[rid][0]) & set(weights):
+            dot = sum(weights.get(i, 0.0) * v for i, v in zip(*SPARSE[rid], strict=True))
+            scores[rid] = 1 - dot
+    return scores
+
+
+def ranked(scores):
+    return sorted(scores, key=lambda rid: (scores[rid], IDS.index(rid)))
+
+
+@pytest.fixture
+def sparse_coll(pgchroma_server):
+    from harness import make_client
+
+    cl = make_client(pgchroma_server.url)
+    for c in cl.list_collections():
+        cl.delete_collection(c.name)
+    c = cl.create_collection("sparse", embedding_function=None)
+    c.add(ids=IDS, embeddings=VECS, metadatas=sparse_metadatas(), documents=DOCS)
+    return c
+
+
+def test_sparse_vectors_round_trip_in_metadata(sparse_coll):
+    got = sparse_coll.get(ids=["a", "d"], include=["metadatas"])
+    assert got["metadatas"][0]["sp"].indices == [1, 4, 9]
+    assert got["metadatas"][0]["sp"].values == [0.5, 1.0, 2.0]
+    assert "sp" not in got["metadatas"][1]
+
+
+def test_sparse_knn_scores_are_one_minus_dot(sparse_coll):
+    from chromadb import SparseVector
+
+    q = ([1, 2, 4], [1.0, 0.5, 0.2])
+    r = sparse_coll.search(
+        Search().rank(Knn(query=SparseVector(*q), key="sp", limit=10)).select(K.SCORE)
+    )
+    want = sparse_scores(*q)
+    assert r["ids"] == [ranked(want)]
+    assert np.allclose(r["scores"][0], [want[i] for i in ranked(want)], atol=1e-6)
+
+
+def test_sparse_knn_with_filter_and_limit(sparse_coll):
+    from chromadb import SparseVector
+
+    q = ([4, 9], [1.0, 1.0])
+    r = sparse_coll.search(
+        Search().where(K("cat") == "x").rank(Knn(query=SparseVector(*q), key="sp", limit=2))
+    )
+    want = {k: v for k, v in sparse_scores(*q).items() if META[IDS.index(k)]["cat"] == "x"}
+    assert r["ids"] == [ranked(want)[:2]]
+
+
+def test_bm25_scales_query_weights_by_idf(pgchroma_server):
+    from chromadb import Schema, SparseVector, SparseVectorIndexConfig
+    from harness import make_client
+
+    cl = make_client(pgchroma_server.url)
+    for c in cl.list_collections():
+        cl.delete_collection(c.name)
+    schema = Schema().create_index(config=SparseVectorIndexConfig(bm25=True), key="sp")
+    c = cl.create_collection("bm25", schema=schema, embedding_function=None)
+    c.add(ids=IDS, embeddings=VECS, metadatas=sparse_metadatas())
+    q = ([1, 2, 4, 7], [1.0, 1.0, 1.0, 1.0])
+    r = c.search(Search().rank(Knn(query=SparseVector(*q), key="sp", limit=10)).select(K.SCORE))
+    want = sparse_scores(*q, idf=True)
+    assert r["ids"] == [ranked(want)]
+    assert np.allclose(r["scores"][0], [want[i] for i in ranked(want)], atol=1e-6)
+
+
+def test_hybrid_rrf_of_dense_and_sparse(sparse_coll):
+    from chromadb import SparseVector
+
+    dq, sq = [1, 0, 0], ([4], [1.0])
+    r = sparse_coll.search(
+        Search()
+        .rank(
+            Rrf(
+                [
+                    Knn(query=dq, return_rank=True, limit=3),
+                    Knn(query=SparseVector(*sq), key="sp", return_rank=True, limit=3),
+                ],
+                k=60,
+            )
+        )
+        .select(K.SCORE)
+    )
+    dense = sorted(range(len(IDS)), key=lambda i: (l2(dq)[i], i))[:3]
+    sparse = ranked(sparse_scores(*sq))[:3]
+    both = [IDS[i] for i in dense if IDS[i] in sparse]
+    fused = {
+        rid: -(1 / (60 + [IDS[i] for i in dense].index(rid)) + 1 / (60 + sparse.index(rid)))
+        for rid in both
+    }
+    assert r["ids"] == [ranked(fused)]
+    assert np.allclose(r["scores"][0], [fused[i] for i in ranked(fused)], atol=1e-9)
+
+
+def test_bm25_embedding_function_end_to_end(pgchroma_server):
+    pytest.importorskip("snowballstemmer")
+    from chromadb import Schema, SparseVectorIndexConfig
+    from chromadb.utils.embedding_functions import ChromaBm25EmbeddingFunction
+    from harness import make_client
+
+    cl = make_client(pgchroma_server.url)
+    for c in cl.list_collections():
+        cl.delete_collection(c.name)
+    schema = Schema().create_index(
+        config=SparseVectorIndexConfig(
+            source_key=K.DOCUMENT, embedding_function=ChromaBm25EmbeddingFunction(), bm25=True
+        ),
+        key="bm25",
+    )
+    c = cl.create_collection("bm25-docs", schema=schema, embedding_function=None)
+    docs = ["the cat sat on the mat", "dogs bark loudly", "a cat chased a cat", "fresh bread"]
+    c.add(ids=["m", "d", "cc", "b"], embeddings=[[1, 0], [0, 1], [1, 1], [0, 0.5]], documents=docs)
+    r = c.search(Search().rank(Knn(query="cats", key="bm25", limit=10)).select(K.DOCUMENT))
+    assert r["ids"] == [["cc", "m"]]
+
+
+def test_sparse_knn_rejects_dense_query_on_metadata_key(coll):
+    with pytest.raises(chromadb.errors.InvalidArgumentError, match="sparse"):
         coll.search(Search().rank(Knn(query=[1, 0, 0], key="sparse_field")))

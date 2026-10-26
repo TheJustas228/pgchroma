@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -926,6 +927,57 @@ class Store:
                 settings.append("set_config('hnsw.iterative_scan', 'relaxed_order', true)")
             await conn.execute("SELECT " + ", ".join(settings), values)
             return await (await conn.execute(query, [list(queries), *params, n])).fetchall()
+
+    async def sparse_knn(
+        self,
+        coll: CollectionRef,
+        key: str,
+        indices: list[int],
+        values: list[float],
+        n: int,
+        cond: sql.Composable,
+        params: list,
+        bm25: bool = False,
+    ) -> list[tuple]:
+        """Top n records for a sparse vector query against metadata[key]: rows of (seq, id, score).
+
+        Chroma's rules: the score is 1 - query·document (lower is better), only records that
+        share a dimension with the query are candidates, and with bm25 every query weight is
+        scaled by ln(1 + (N - n_t + 0.5) / (n_t + 0.5)), where N counts the collection's
+        records and n_t those whose vector has dimension t.
+        """
+        if not indices:
+            return []
+        # One containment probe per query dimension; the jsonb GIN index answers each.
+        probes = [orjson.dumps({key: {"indices": [i]}}).decode() for i in indices]
+        has_dim = sql.SQL(" OR ").join([sql.SQL("metadata @> %s::jsonb")] * len(probes))
+        async with self._tx() as conn:
+            if bm25:
+                counts = sql.SQL(", ").join(
+                    [sql.SQL("count(*)")]
+                    + [sql.SQL("count(*) FILTER (WHERE metadata @> %s::jsonb)")] * len(probes)
+                )
+                row = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {} FROM {}").format(counts, coll.table), probes
+                    )
+                ).fetchone()
+                total = row[0]
+                values = [
+                    v * math.log1p((total - min(nt, total) + 0.5) / (min(nt, total) + 0.5))
+                    for v, nt in zip(values, row[1:], strict=True)
+                ]
+            query = sql.SQL(
+                "SELECT r.seq, r.id, 1 - s.dot AS score FROM {t} r "
+                "CROSS JOIN LATERAL ("
+                "SELECT sum((r.metadata->%s->'values'->>(d.o::int - 1))::float8 * q.v) AS dot "
+                "FROM jsonb_array_elements_text(r.metadata->%s->'indices') WITH ORDINALITY d(i, o) "
+                "JOIN unnest(%s::bigint[], %s::float8[]) q(i, v) ON q.i = d.i::bigint"
+                ") s WHERE ({has_dim}) AND ({c}) ORDER BY score, r.seq LIMIT %s"
+            ).format(t=coll.table, has_dim=has_dim, c=cond)
+            return await (
+                await conn.execute(query, [key, key, indices, values, *probes, *params, n])
+            ).fetchall()
 
     async def query(
         self, coll, query_embeddings, n_results, ids, where, where_document, include, *, exact=False

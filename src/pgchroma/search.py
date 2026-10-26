@@ -1,11 +1,12 @@
 """Chroma's Search API (`POST .../search`) on Postgres.
 
 Supported: filters (`where` syntax plus `#id` / `#document`), ranking expressions built from
-dense `Knn` (distance or 0-based rank, `limit`, `default`) combined with `$val`, `$sum`,
-`$sub`, `$mul`, `$div`, `$abs`, `$exp`, `$log`, `$max`, `$min` (which is how the client
-encodes `Rrf`), `limit`/`offset`, and `select`.
+`Knn` (distance or 0-based rank, `limit`, `default`) over the dense embedding or over sparse
+vectors stored in metadata (with Chroma's BM25 weighting when the schema asks for it), combined
+with `$val`, `$sum`, `$sub`, `$mul`, `$div`, `$abs`, `$exp`, `$log`, `$max`, `$min` (which is how
+the client encodes `Rrf`), `limit`/`offset`, and `select`.
 
-Not yet: `Knn` over sparse vectors stored in metadata, and `group_by`.
+Not yet: `group_by`.
 """
 
 from __future__ import annotations
@@ -29,23 +30,53 @@ class _Knn:
     def __init__(self, spec: dict):
         if not isinstance(spec, dict) or "query" not in spec:
             raise InvalidArgumentError(f"Invalid $knn expression: {spec!r}")
-        key = spec.get("key", EMBEDDING_KEY)
-        if key != EMBEDDING_KEY:
-            raise NotSupportedError(
-                f"Knn over the metadata field {key!r} (sparse vectors) is not supported by pgchroma yet"
-            )
+        self.key = spec.get("key", EMBEDDING_KEY)
         query = spec["query"]
-        if isinstance(query, dict) or not isinstance(query, list):
-            raise NotSupportedError(
-                "Only dense query vectors are supported by pgchroma's Search API"
+        self.sparse: tuple[list[int], list[float]] | None = None
+        if self.key == EMBEDDING_KEY:
+            if not isinstance(query, list):
+                raise InvalidArgumentError("Knn over #embedding expects a dense query vector")
+            self.query = np.asarray([query], dtype=np.float32)
+        elif not isinstance(self.key, str) or self.key.startswith("#"):
+            raise InvalidArgumentError(
+                f"Knn key must be #embedding or a metadata field, got {self.key!r}"
             )
-        self.query = np.asarray([query], dtype=np.float32)
+        else:
+            self.sparse = _sparse_query(query)
         self.limit = int(spec.get("limit", 16))
         if self.limit < 1:
             raise InvalidArgumentError("Knn limit must be at least 1")
         self.default = spec.get("default")
         self.return_rank = bool(spec.get("return_rank", False))
         self.scores: dict[str, float] = {}
+
+
+def _sparse_query(query: Any) -> tuple[list[int], list[float]]:
+    if not isinstance(query, dict) or query.get("#type") != "sparse_vector":
+        raise InvalidArgumentError("Knn over a metadata field expects a sparse vector query")
+    indices, values = query.get("indices"), query.get("values")
+    if not isinstance(indices, list) or not isinstance(values, list) or len(indices) != len(values):
+        raise InvalidArgumentError("A sparse vector needs indices and values of the same length")
+    if any(not isinstance(i, int) or isinstance(i, bool) or i < 0 for i in indices):
+        raise InvalidArgumentError("Sparse vector indices must be non-negative integers")
+    try:
+        floats = [float(v) for v in values]
+    except (TypeError, ValueError):
+        raise InvalidArgumentError("Sparse vector values must be numbers") from None
+    if not all(math.isfinite(v) for v in floats):
+        raise InvalidArgumentError("Sparse vector values must be finite")
+    return indices, floats
+
+
+def _uses_bm25(schema: dict | None, key: str) -> bool:
+    """Chroma's rule: the key's own sparse index config decides; otherwise the schema default."""
+
+    def flag(value_types: Any) -> Any:
+        index = ((value_types or {}).get("sparse_vector") or {}).get("sparse_vector_index") or {}
+        return (index.get("config") or {}).get("bm25")
+
+    own = flag(((schema or {}).get("keys") or {}).get(key))
+    return bool(own if own is not None else flag((schema or {}).get("defaults")))
 
 
 def _compile_rank(node: Any, knns: list[_Knn]) -> Callable[[str], float | None]:
@@ -148,18 +179,30 @@ async def _one(store: Store, coll: CollectionRef, payload: dict) -> dict:
         ordered = [(r[0], None) for r in rows]
     else:
         candidates: dict[str, None] = {}
-        if coll.dimension is not None:
-            for knn in knns:
-                if knn.query.shape[1] != coll.dimension:
-                    raise InvalidArgumentError(
-                        f"Collection expecting embedding with dimension of {coll.dimension}, got {knn.query.shape[1]}"
-                    )
+        for knn in knns:
+            if knn.sparse is not None:
+                rows = await store.sparse_knn(
+                    coll,
+                    knn.key,
+                    *knn.sparse,
+                    knn.limit,
+                    cond,
+                    params,
+                    bm25=_uses_bm25(coll.schema, knn.key),
+                )
+            elif coll.dimension is None:
+                continue  # no records yet
+            elif knn.query.shape[1] != coll.dimension:
+                raise InvalidArgumentError(
+                    f"Collection expecting embedding with dimension of {coll.dimension}, got {knn.query.shape[1]}"
+                )
+            else:
                 rows = await store.knn(
                     coll, knn.query, knn.limit, cond, params, payload.get("filter") is not None, []
                 )
-                for position, row in enumerate(rows):
-                    knn.scores[row[1]] = float(position) if knn.return_rank else float(row[2])
-                    candidates.setdefault(row[1])
+            for position, row in enumerate(rows):
+                knn.scores[row[1]] = float(position) if knn.return_rank else float(row[2])
+                candidates.setdefault(row[1])
         scored = [(rid, score_of(rid)) for rid in candidates]
         scored = [(rid, s) for rid, s in scored if s is not None and not math.isnan(s)]
         seqs = await _fetch(store, coll, [rid for rid, _ in scored])
