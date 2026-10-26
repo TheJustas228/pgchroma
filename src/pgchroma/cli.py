@@ -327,7 +327,7 @@ async def _doctor(args) -> int:
         )
         table.add_row("pgvector", pv + note)
         table.add_row("schema", args.schema)
-        async with store.pool.connection() as conn:
+        async with store._tx() as conn:
             rows = await (
                 await conn.execute(
                     "SELECT c.id, c.name, d.tenant, d.name, c.dimension, c.space FROM collections c "

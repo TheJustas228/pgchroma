@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS migrations (
     PRIMARY KEY (source, collection_id)
 );
 
+-- One row while a process builds a collection's HNSW index. A lease instead of an advisory
+-- lock, because session locks do not work behind transaction poolers.
+CREATE TABLE IF NOT EXISTS index_builds (
+    table_name text PRIMARY KEY,
+    owner      text NOT NULL,
+    started_at timestamptz NOT NULL DEFAULT now()
+);
+
 INSERT INTO tenants (name) VALUES ('default_tenant') ON CONFLICT DO NOTHING;
 
 INSERT INTO databases (id, tenant, name)

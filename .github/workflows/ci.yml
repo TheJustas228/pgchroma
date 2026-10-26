@@ -55,6 +55,39 @@ jobs:
       - run: uv sync --frozen
       - run: uv run pytest -q -ra
 
+  pooler:
+    name: test behind PgBouncer (transaction mode)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.25.2-p0
+        env:
+          DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
+          POOL_MODE: transaction
+          AUTH_TYPE: scram-sha-256
+          MAX_PREPARED_STATEMENTS: "0"
+        ports: ["6432:5432"]
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      PGCHROMA_TEST_POOLER_URL: postgresql://postgres:postgres@localhost:6432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: wait for PgBouncer
+        run: for i in $(seq 1 30); do pg_isready -h localhost -p 6432 && break; sleep 1; done
+      - run: uv run pytest -q -ra tests/test_pooler.py
+
   docker:
     runs-on: ubuntu-latest
     steps:

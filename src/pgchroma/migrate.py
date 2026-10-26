@@ -192,7 +192,7 @@ def hosted_embedding_functions(collection: dict) -> list[str]:
 async def _checkpoint(
     store: Store, key: str, collection_id, *, copied: int | None = None, done: bool = False
 ):
-    async with store.pool.connection() as conn:
+    async with store._tx() as conn:
         if copied is None:
             row = await (
                 await conn.execute(

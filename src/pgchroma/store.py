@@ -34,7 +34,7 @@ from .config import (
     normalize_configuration,
     validate_collection_name,
 )
-from .db import PgInfo
+from .db import PgInfo, use_schema
 from .errors import ChromaError, DuplicateError, InternalError, InvalidArgumentError, NotFoundError
 from .filters import compile_where, compile_where_document
 from .indexing import ensure_index, index_plan
@@ -259,8 +259,23 @@ class Store:
     @contextlib.asynccontextmanager
     async def _tx(self) -> AsyncIterator[psycopg.AsyncConnection]:
         with _translate_errors():
-            async with self.pool.connection() as conn, conn.transaction():
-                yield conn
+            try:
+                async with self.pool.connection() as conn, conn.transaction():
+                    # Behind a transaction pooler the session's search_path may belong to
+                    # another client, so it is set again inside every transaction.
+                    if self.pool.pgchroma_pooled:
+                        await use_schema(conn, self.pool)
+                    yield conn
+            except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedObject):
+                if not self.pool.pgchroma_pooled:
+                    log.warning(
+                        "a table or type in pgchroma's schema was not found: this connection "
+                        "looks like a transaction pooler (PgBouncer, Supavisor). Setting the "
+                        "search_path in every transaction from now on; set "
+                        "PGCHROMA_POOLER=transaction to start that way."
+                    )
+                    self.pool.pgchroma_pooled = True
+                raise
 
     # ------------------------------------------------------------- tenants
 
