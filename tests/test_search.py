@@ -293,3 +293,67 @@ def test_bm25_embedding_function_end_to_end(pgchroma_server):
 def test_sparse_knn_rejects_dense_query_on_metadata_key(coll):
     with pytest.raises(chromadb.errors.InvalidArgumentError, match="sparse"):
         coll.search(Search().rank(Knn(query=[1, 0, 0], key="sparse_field")))
+
+
+# group_by follows rust/worker/src/execution/operators/ranked_group_by.rs: after ranking, records
+# are grouped by the group keys (records missing a key share the "missing" group), each group
+# keeps its first k records ordered by the aggregate keys (MinK ascending, MaxK descending), and
+# the survivors are re-sorted by score before limit/offset.
+
+
+def grouped_reference(scores, group_key, agg_key, k, largest=False):
+    groups = {}
+    for rid in sorted(scores, key=lambda r: (scores[r], IDS.index(r))):
+        groups.setdefault(META[IDS.index(rid)].get(group_key), []).append(rid)
+    kept = []
+    for members in groups.values():
+
+        def order(r):
+            return scores[r] if agg_key == "#score" else META[IDS.index(r)][agg_key]
+
+        kept += sorted(members, key=order, reverse=largest)[:k]
+    return sorted(kept, key=lambda r: (scores[r], IDS.index(r)))
+
+
+def test_group_by_keeps_best_per_group(coll):
+    from chromadb.execution.expression.operator import GroupBy, MinK
+
+    q = [0.6, 0.5, 0.2]
+    r = coll.search(
+        Search()
+        .rank(Knn(query=q, limit=6))
+        .group_by(GroupBy(keys=K("cat"), aggregate=MinK(keys=K.SCORE, k=1)))
+        .select(K.SCORE)
+    )
+    scores = dict(zip(IDS, l2(q).tolist(), strict=True))
+    want = grouped_reference(scores, "cat", "#score", 1)
+    assert len(want) == 3
+    assert r["ids"] == [want]
+    assert np.allclose(r["scores"][0], [scores[i] for i in want], atol=1e-5)
+
+
+def test_group_by_max_k_on_metadata_then_limit(coll):
+    from chromadb.execution.expression.operator import GroupBy, MaxK
+
+    q = [0.2, 0.3, 0.9]
+    r = coll.search(
+        Search()
+        .rank(Knn(query=q, limit=6))
+        .group_by(GroupBy(keys=[K("cat")], aggregate=MaxK(keys=[K("year")], k=2)))
+        .limit(3)
+    )
+    scores = dict(zip(IDS, l2(q).tolist(), strict=True))
+    assert r["ids"] == [grouped_reference(scores, "cat", "year", 2, largest=True)[:3]]
+
+
+def test_group_by_missing_key_is_one_group(coll):
+    from chromadb.execution.expression.operator import GroupBy, MinK
+
+    q = [0, 1, 0]
+    r = coll.search(
+        Search()
+        .rank(Knn(query=q, limit=6))
+        .group_by(GroupBy(keys=K("no_such_field"), aggregate=MinK(keys=K.SCORE, k=2)))
+    )
+    order = sorted(IDS, key=lambda rid: (l2(q)[IDS.index(rid)], IDS.index(rid)))
+    assert r["ids"] == [order[:2]]

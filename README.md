@@ -204,7 +204,7 @@ push (the core suite also runs on Postgres 15).
 | Token auth (`x-chroma-token` or `Authorization: Bearer`) | ✅ |
 | Search API: `Search().where().rank(Knn / Rrf / arithmetic).limit().select()`, `#id` / `#document` filters | ✅ |
 | Sparse vectors (`SparseVector` metadata), sparse `Knn`, BM25 weighting (`bm25=True`), hybrid `Rrf` of dense + sparse | ✅ scored like Chroma Cloud (`1 - query·document`, BM25 IDF over the collection), following Chroma's source; no self-hosted Chroma can run these to compare against |
-| Search API: `group_by` | ❌ not yet ([roadmap](https://github.com/TheJustas228/pgchroma/issues)) |
+| Search API: `group_by` with `MinK` / `MaxK` (top k per group) | ✅ following Chroma's source |
 | Attached functions, quotas, Chroma Cloud billing APIs | ❌ |
 | Pre-1.0 clients (v1 API) | ❌ answers `410` with an upgrade hint |
 

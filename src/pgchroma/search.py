@@ -4,13 +4,12 @@ Supported: filters (`where` syntax plus `#id` / `#document`), ranking expression
 `Knn` (distance or 0-based rank, `limit`, `default`) over the dense embedding or over sparse
 vectors stored in metadata (with Chroma's BM25 weighting when the schema asks for it), combined
 with `$val`, `$sum`, `$sub`, `$mul`, `$div`, `$abs`, `$exp`, `$log`, `$max`, `$min` (which is how
-the client encodes `Rrf`), `limit`/`offset`, and `select`.
-
-Not yet: `group_by`.
+the client encodes `Rrf`), `group_by` with `MinK` / `MaxK`, `limit`/`offset`, and `select`.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Callable
 from typing import Any
@@ -125,6 +124,77 @@ def _compile_rank(node: Any, knns: list[_Knn]) -> Callable[[str], float | None]:
     raise NotSupportedError(f"Rank operator {op} is not supported by pgchroma")
 
 
+def _parse_group_by(spec: Any) -> tuple[list[str], bool, list[str], int] | None:
+    """(group keys, largest?, aggregate keys, k), or None when the search is not grouped."""
+    if not spec:
+        return None
+    if not isinstance(spec, dict) or not spec.get("keys") or not spec.get("aggregate"):
+        raise InvalidArgumentError("group_by needs keys and an aggregate")
+    keys = spec["keys"]
+    if not isinstance(keys, list) or not all(
+        isinstance(k, str) and not k.startswith("#") for k in keys
+    ):
+        raise InvalidArgumentError("group_by keys must be metadata fields")
+    aggregate = spec["aggregate"]
+    if not isinstance(aggregate, dict) or len(aggregate) != 1:
+        raise InvalidArgumentError(f"Invalid group_by aggregate: {aggregate!r}")
+    op, arg = next(iter(aggregate.items()))
+    if op not in ("$min_k", "$max_k") or not isinstance(arg, dict):
+        raise InvalidArgumentError(f"Unknown group_by aggregate {op}; expected $min_k or $max_k")
+    agg_keys, k = arg.get("keys"), arg.get("k")
+    if (
+        not isinstance(agg_keys, list)
+        or not agg_keys
+        or not all(
+            isinstance(a, str) and (a == "#score" or not a.startswith("#")) for a in agg_keys
+        )
+    ):
+        raise InvalidArgumentError("Aggregate keys must be metadata fields or #score")
+    if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+        raise InvalidArgumentError("Aggregate k must be a positive integer")
+    return keys, op == "$max_k", agg_keys, k
+
+
+def _order_value(value: Any) -> tuple:
+    """Chroma's ordering of metadata values: missing first, then bool < int < float < str <
+    sparse vector < lists, each compared by value."""
+    if value is None:
+        return (0,)
+    if isinstance(value, bool):
+        return (1, 0, value)
+    if isinstance(value, int):
+        return (1, 1, value)
+    if isinstance(value, float):
+        return (1, 2, value)
+    if isinstance(value, str):
+        return (1, 3, value)
+    if isinstance(value, dict):
+        return (1, 4, tuple(value.get("indices") or ()), tuple(value.get("values") or ()))
+    if isinstance(value, list):
+        first = value[0] if value else 0
+        kind = 5 if isinstance(first, bool) else 6 if isinstance(first, int) else 7
+        return (1, 8 if isinstance(first, str) else kind, tuple(value))
+    return (1, 9, str(value))
+
+
+def _group(scored: list[tuple[str, float]], rows: dict[str, tuple], group) -> list:
+    """Chroma's RankedGroupBy: keep the first k records of every group by the aggregate keys,
+    then re-sort the survivors by score. `scored` is sorted by (score, insertion order)."""
+    keys, largest, agg_keys, k = group
+
+    def extract(item, names):
+        rid, score = item
+        meta = rows[rid][4] or {}
+        return tuple(_order_value(score if n == "#score" else meta.get(n)) for n in names)
+
+    kept = []
+    by_group = sorted(scored, key=lambda item: extract(item, keys))
+    for _, members in itertools.groupby(by_group, key=lambda item: extract(item, keys)):
+        ordered = sorted(members, key=lambda item: extract(item, agg_keys), reverse=largest)
+        kept.extend(ordered[:k])
+    return sorted(kept, key=lambda item: (item[1], rows[item[0]][1]))
+
+
 def _parse_limit(spec: Any) -> tuple[int, int | None]:
     if spec is None:
         return 0, None
@@ -154,8 +224,7 @@ async def _fetch(store: Store, coll: CollectionRef, ids: list[str]) -> dict[str,
 async def _one(store: Store, coll: CollectionRef, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise InvalidArgumentError("Each search must be an object")
-    if payload.get("group_by"):
-        raise NotSupportedError("group_by is not supported by pgchroma yet")
+    group = _parse_group_by(payload.get("group_by"))
     cond_sql, params = compile_search_filter(payload.get("filter"))
     cond = sql.SQL(cond_sql)
     offset, limit = _parse_limit(payload.get("limit"))
@@ -207,6 +276,8 @@ async def _one(store: Store, coll: CollectionRef, payload: dict) -> dict:
         scored = [(rid, s) for rid, s in scored if s is not None and not math.isnan(s)]
         seqs = await _fetch(store, coll, [rid for rid, _ in scored])
         scored.sort(key=lambda t: (t[1], seqs[t[0]][1]))
+        if group is not None:
+            scored = _group(scored, seqs, group)
         ordered = scored[offset : None if limit is None else offset + limit]
 
     ids = [rid for rid, _ in ordered]
