@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-27)
 
 - Added: works behind transaction poolers (PgBouncer, Supavisor, Neon's pooled endpoint).
   pgchroma sets its search path per transaction there, builds indexes with standalone,
