@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-26)
 
 - Added: sparse vector search. `Knn` over `SparseVector` metadata fields with Chroma Cloud's
   scoring (`1 - query·document`), BM25 weighting when the schema sets `bm25=True`, and hybrid
