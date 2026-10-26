@@ -177,7 +177,8 @@ the flag, `pgchroma migrate` warns about every collection that uses a hosted fun
 ## Compatibility
 
 Tested with the official clients `chromadb` 1.5.9 (Python) and `chromadb` 3.5.0 (npm), against
-a real Chroma 1.5.9 server, on Postgres 15–17 and pgvector 0.6–0.8.
+a real Chroma 1.5.9 server, on Postgres 16 and 17 with pgvector 0.6, 0.7 and 0.8, in CI on every
+push (the core suite also runs on Postgres 15).
 
 | | |
 |---|---|
