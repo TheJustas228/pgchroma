@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [{ name = "Justas", email = "justassinkevicius228@gmail.com" }]
+authors = [{ name = "Justas" }]
 keywords = ["chroma", "chromadb", "postgres", "pgvector", "vector-database", "rag", "embeddings", "migration"]
 classifiers = [
     "Development Status :: 4 - Beta",
