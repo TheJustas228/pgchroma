@@ -26,7 +26,7 @@ notes.upsert(
 hits = notes.query(
     query_texts=["where are my embeddings stored?"], n_results=2, include=["documents", "distances"]
 )
-for doc, dist in zip(hits["documents"][0], hits["distances"][0]):
+for doc, dist in zip(hits["documents"][0], hits["distances"][0], strict=True):
     print(f"{dist:.3f}  {doc}")
 
 print(
