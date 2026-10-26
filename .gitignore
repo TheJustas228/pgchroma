@@ -12,3 +12,4 @@ htmlcov/
 .superpowers/
 .pgdata/
 *.log
+site/

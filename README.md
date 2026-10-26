@@ -12,6 +12,7 @@ Supabase, Neon, RDS, Cloud SQL, Railway, or the Postgres on your laptop.
 ![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
 ![Chroma API](https://img.shields.io/badge/Chroma%20API-v2%20(chromadb%201.x)-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-thejustas228.github.io%2Fpgchroma-indigo)](https://thejustas228.github.io/pgchroma/)
 
 > **Leaving Chroma Cloud?** Chroma Cloud stops accepting writes on **November 22, 2026** and
 > stops serving reads on **December 22, 2026**
@@ -267,15 +268,19 @@ pgchroma is a stateless web app. Give it `DATABASE_URL` and a port.
 | `PGCHROMA_INDEX_THRESHOLD` / `--index-threshold` | `10000` | records before a collection gets an HNSW index |
 | `PGCHROMA_POOL_SIZE` / `--pool-size` | `10` | Postgres connections per worker |
 | `--workers` | `1` | worker processes |
-| `PGCHROMA_MAINTENANCE_WORK_MEM` | `1GB` | memory for index builds (session setting) |
+| `PGCHROMA_POOLER` | auto | `transaction` behind PgBouncer in transaction mode (Neon and Supabase poolers are detected) |
+| `PGCHROMA_MAINTENANCE_WORK_MEM` | `1GB` | memory for index builds (session setting, direct connections only) |
 
 - **Docker:** `ghcr.io/thejustas228/pgchroma` (amd64 and arm64). The image listens on `$PORT`,
   so it runs as-is on Railway, Render, Fly.io, Cloud Run and similar platforms.
-- **Supabase:** enable the `vector` extension and use the direct connection or the *session*
-  pooler (port 5432). The transaction pooler (port 6543) is not supported: background index
-  builds rely on session-level settings and advisory locks.
-- **Neon / RDS / Cloud SQL / Azure:** enable `vector` once (`CREATE EXTENSION vector;`), then
-  point `DATABASE_URL` at the database.
+- **Neon:** tested (Postgres 17, pgvector 0.8). Either connection string works; the pooled
+  `-pooler` endpoint is detected automatically.
+- **Supabase:** enable the `vector` extension; the direct connection, the session pooler and the
+  transaction pooler (port 6543, detected automatically) all work.
+- **Other transaction poolers (PgBouncer):** set `PGCHROMA_POOLER=transaction`. pgchroma then
+  sets its search path in every transaction and coordinates index builds through a table.
+- **RDS / Cloud SQL / Azure:** enable `vector` once (`CREATE EXTENSION vector;`), then point
+  `DATABASE_URL` at the database.
 - **Auth:** set `PGCHROMA_AUTH_TOKENS`, then in Python
   `chromadb.HttpClient(host=..., headers={"x-chroma-token": "<token>"})`.
 
@@ -338,3 +343,5 @@ Chroma Cloud data until you have verified the migration. Issues and PRs are welc
 ## License
 
 MIT
+
+If pgchroma saves you a migration, a ⭐ on the repo helps other Chroma users find it.

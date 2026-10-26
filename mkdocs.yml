@@ -1,0 +1,66 @@
+site_name: pgchroma
+site_description: Run Chroma apps on Postgres + pgvector without changing code, and move off Chroma Cloud before it shuts down.
+site_url: https://thejustas228.github.io/pgchroma/
+repo_url: https://github.com/TheJustas228/pgchroma
+repo_name: TheJustas228/pgchroma
+edit_uri: edit/main/docs/
+copyright: MIT licensed. pgchroma is not affiliated with Chroma.
+
+exclude_docs: |
+  superpowers/
+  assets/render.py
+  assets/embeddings.json
+
+theme:
+  name: material
+  custom_dir: overrides
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.sections
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Move off Chroma Cloud: migrate-from-chroma-cloud.md
+  - Chroma Cloud alternatives: chroma-cloud-alternatives.md
+  - Hybrid search on Postgres: hybrid-search.md
+  - Hosted embedding functions: embedding-functions.md
+  - Deploy (Supabase, Neon, RDS, Docker): deploy.md
+  - Compatibility: compatibility.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/TheJustas228/pgchroma

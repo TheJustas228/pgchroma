@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added: works behind transaction poolers (PgBouncer, Supavisor, Neon's pooled endpoint).
+  pgchroma sets its search path per transaction there, builds indexes with standalone,
+  schema-qualified statements and a lease row instead of a session advisory lock, and detects
+  Neon `-pooler` hosts and port 6543 automatically (`PGCHROMA_POOLER=transaction` for others).
+  Before, those connection strings failed with "Collection does not exist".
+- Tested on Neon (Postgres 17.11, pgvector 0.8.0); CI runs the pooler tests through PgBouncer.
+- Docs site: https://thejustas228.github.io/pgchroma/
+
 ## 0.2.0 (2026-10-26)
 
 - Added: sparse vector search. `Knn` over `SparseVector` metadata fields with Chroma Cloud's
