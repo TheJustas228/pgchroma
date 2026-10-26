@@ -113,8 +113,8 @@ uvx --from git+https://github.com/TheJustas228/pgchroma pgchroma serve --databas
 # 3. swap CloudClient for HttpClient in your app (the migrate output prints the exact line)
 ```
 
-The run in the recording above, as text (three collections, real embeddings from Chroma's
-default model):
+The same migration as text (three collections with real embeddings from Chroma's default
+model):
 
 ```text
 Source: http://localhost:8001 tenant default_tenant
