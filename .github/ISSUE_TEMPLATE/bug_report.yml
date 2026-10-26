@@ -1,0 +1,35 @@
+name: Bug report
+description: Something behaves differently from Chroma, or pgchroma fails
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected (for example what Chroma returns), and what pgchroma did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Code to reproduce
+      description: The smallest client code or `pgchroma` command that shows it.
+      render: python
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `pgchroma doctor`
+      description: Shows the Postgres and pgvector versions and your collections' index state.
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: pgchroma 0.1.0, chromadb 1.5.9 (Python 3.12)
+    validations:
+      required: true
+  - type: dropdown
+    id: postgres
+    attributes:
+      label: Where Postgres runs
+      options: [Local / Docker, Supabase, Neon, AWS RDS / Aurora, Google Cloud SQL, Azure, Railway / Render / Fly, Other]

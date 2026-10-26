@@ -52,8 +52,9 @@ docs.query(query_texts=["how do refunds work?"], n_results=5, where={"lang": "en
 - **One database.** Join your embeddings with your users, orders and permissions in SQL.
   Your vectors are just tables: `pgchroma.c_<collection id>`.
 - **Things single-node Chroma can't do.** The Chroma Cloud **Search API** (`Search`, `Knn`,
-  `Rrf`, ranking expressions) works on pgchroma; self-hosted single-node Chroma answers
-  "not implemented".
+  `Rrf`, ranking expressions) and **sparse vectors** (BM25, SPLADE, hybrid search) work on
+  pgchroma. Self-hosted single-node Chroma answers "not implemented" for the Search API and
+  rejects sparse vectors, so pgchroma is the self-hosted home for Chroma Cloud's hybrid search.
 
 ## Quickstart
 
@@ -167,8 +168,8 @@ Details that matter:
 
 The embeddings you already stored are copied as they are. Only *new* embeddings (for `add` with
 `documents` and for `query_texts`) need a model, and Chroma Cloud's hosted ones stop with Chroma
-Cloud. `chroma-cloud-qwen` is the open model `Qwen/Qwen3-Embedding-0.6B`, so you can run it
-yourself:
+Cloud. `chroma-cloud-qwen` and `chroma-cloud-splade` are open models
+(`Qwen/Qwen3-Embedding-0.6B` and `prithivida/Splade_PP_en_v1`), so you can run them yourself:
 
 ```bash
 pip install sentence-transformers
@@ -176,13 +177,13 @@ pgchroma migrate --from-cloud --api-key "$CHROMA_API_KEY" --database-url "$DATAB
     --local-embedding-functions
 ```
 
-With `--local-embedding-functions`, collections that used `chroma-cloud-qwen` are configured to
-use the same model through sentence-transformers. The client loads it from the collection
+With `--local-embedding-functions`, collections that used `chroma-cloud-qwen` (dense) or
+`chroma-cloud-splade` (sparse) are configured to use the same open models
+(`Qwen/Qwen3-Embedding-0.6B`, `prithivida/Splade_PP_en_v1`) through sentence-transformers. The client loads it from the collection
 configuration, so `query_texts=` and `add(documents=...)` keep working without code changes. If
 your collection used a Qwen *task* (such as `nl_to_code`), queries need an instruction prefix;
 [`examples/local_qwen_embeddings.py`](examples/local_qwen_embeddings.py) shows how. Without
 the flag, `pgchroma migrate` warns about every collection that uses a hosted function.
-`chroma-cloud-splade` (sparse) has no automatic replacement yet.
 
 ## Compatibility
 
@@ -201,8 +202,9 @@ push (the core suite also runs on Postgres 15).
 | Collection configuration, embedding-function config, metadata, legacy `hnsw:space` metadata | ✅ |
 | Base64 embedding transport, max batch size, `pre-flight-checks` | ✅ |
 | Token auth (`x-chroma-token` or `Authorization: Bearer`) | ✅ |
-| Search API: `Search().where().rank(Knn / Rrf / arithmetic).limit().select()`, `#id` / `#document` filters | ✅ dense vectors |
-| Search API: sparse vectors / BM25 in `Knn`, `group_by` | ❌ not yet ([roadmap](https://github.com/TheJustas228/pgchroma/issues)) |
+| Search API: `Search().where().rank(Knn / Rrf / arithmetic).limit().select()`, `#id` / `#document` filters | ✅ |
+| Sparse vectors (`SparseVector` metadata), sparse `Knn`, BM25 weighting (`bm25=True`), hybrid `Rrf` of dense + sparse | ✅ scored like Chroma Cloud (`1 - query·document`, BM25 IDF over the collection), following Chroma's source; no self-hosted Chroma can run these to compare against |
+| Search API: `group_by` | ❌ not yet ([roadmap](https://github.com/TheJustas228/pgchroma/issues)) |
 | Attached functions, quotas, Chroma Cloud billing APIs | ❌ |
 | Pre-1.0 clients (v1 API) | ❌ answers `410` with an upgrade hint |
 
@@ -248,6 +250,9 @@ How it gets there:
 - Metadata has a GIN index; equality filters use it.
 - Filtered searches on pgvector ≥ 0.8 use iterative index scans, so a selective filter still
   returns `n_results` hits. On older pgvector, filtered searches run exact.
+- Sparse (BM25/SPLADE) searches are exact: candidates come from the jsonb index, then every
+  candidate is scored. 12,000 support tickets with BM25 vectors answer in about 60 ms; there is
+  no inverted index yet, so very large sparse collections are slower than on Chroma Cloud.
 
 ## Deploy
 

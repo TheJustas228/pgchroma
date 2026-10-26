@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added: sparse vector search. `Knn` over `SparseVector` metadata fields with Chroma Cloud's
+  scoring (`1 - query·document`), BM25 weighting when the schema sets `bm25=True`, and hybrid
+  `Rrf` of dense and sparse results. Works with `ChromaBm25EmbeddingFunction` unchanged.
+  Single-node Chroma rejects sparse vectors, so this is new ground for self-hosting.
+- Added: `--local-embedding-functions` also replaces Chroma Cloud's hosted `chroma-cloud-splade`
+  with the same open model (`prithivida/Splade_PP_en_v1`), and keeps the rest of the source
+  schema (sparse indexes were dropped when the Qwen function was replaced).
 - Fixed: `pgchroma migrate` / `verify` reported a false failure ("check the collection's distance
   space") for collections with duplicate documents. Results that are as near as the exact k-th
   neighbour now count as exact.

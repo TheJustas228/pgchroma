@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Migration guide
+    url: https://github.com/TheJustas228/pgchroma#move-off-chroma-cloud-in-three-commands
+    about: Steps for moving off Chroma Cloud before it shuts down
