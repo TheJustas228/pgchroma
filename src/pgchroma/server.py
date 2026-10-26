@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hmac
 import logging
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -154,6 +155,7 @@ class API:
             )
             await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         await bootstrap(self.s.pool, schema)
+        self.s.clear_cache()
         return JSON(True)
 
     # ---------------------------------------------------- tenants/databases
@@ -280,12 +282,14 @@ class API:
     async def indexing_status(self, request: Request) -> JSON:
         coll = await self._coll(request)
         total = await self.s.count(coll)
+        progress = await self.s.indexing_progress(coll)
+        indexed = int(total * progress)
         return JSON(
             {
-                "num_indexed_ops": total,
-                "num_unindexed_ops": 0,
+                "num_indexed_ops": indexed,
+                "num_unindexed_ops": total - indexed,
                 "total_ops": total,
-                "op_indexing_progress": 1.0,
+                "op_indexing_progress": progress,
             }
         )
 
@@ -463,6 +467,7 @@ def create_app(settings: Settings) -> Starlette:
         try:
             yield
         finally:
+            await api.store.close()
             await pool.close()
 
     T = "/api/v2/tenants/{tenant}"
@@ -514,3 +519,25 @@ def create_app(settings: Settings) -> Starlette:
     if tokens:
         middleware.append(Middleware(_TokenAuth, tokens=tokens))
     return Starlette(routes=routes, lifespan=lifespan, middleware=middleware)
+
+
+def settings_from_env() -> Settings:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is not set")
+    return Settings(
+        database_url=url,
+        schema=os.environ.get("PGCHROMA_SCHEMA", "pgchroma"),
+        auth_tokens=[
+            t.strip() for t in os.environ.get("PGCHROMA_AUTH_TOKENS", "").split(",") if t.strip()
+        ],
+        max_batch_size=int(os.environ.get("PGCHROMA_MAX_BATCH_SIZE", "5461")),
+        allow_reset=os.environ.get("PGCHROMA_ALLOW_RESET", "").lower() in ("1", "true", "yes"),
+        index_threshold=int(os.environ.get("PGCHROMA_INDEX_THRESHOLD", "10000")),
+        pool_max_size=int(os.environ.get("PGCHROMA_POOL_SIZE", "10")),
+    )
+
+
+def app_from_env() -> Starlette:
+    """uvicorn factory: `uvicorn pgchroma.server:app_from_env --factory`."""
+    return create_app(settings_from_env())

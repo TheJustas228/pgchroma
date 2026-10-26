@@ -12,6 +12,7 @@ which supports up to 4,000 dimensions; otherwise those collections stay on exact
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 from psycopg import sql
@@ -109,6 +110,12 @@ async def ensure_index(
                         )
                     )
                 log.info("building HNSW index on %s (%s, %s)", table, plan.kind, plan.opclass)
+                # HNSW builds are much faster when the graph fits in maintenance_work_mem
+                # (Postgres defaults to 64MB). Session-level, so it needs no special privileges.
+                await conn.execute(
+                    "SELECT set_config('maintenance_work_mem', %s, false)",
+                    (os.environ.get("PGCHROMA_MAINTENANCE_WORK_MEM", "1GB"),),
+                )
                 await conn.execute(
                     sql.SQL(
                         "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} USING hnsw ({} {}) "

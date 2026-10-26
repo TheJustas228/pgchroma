@@ -126,3 +126,42 @@ async def test_existing_target_collection_is_not_overwritten(real_chroma, store)
     async with ChromaSource(real_chroma.url) as src:
         with pytest.raises(Exception, match="already exists"):
             await migrate(src, store, collections=["tiny-ip"])
+
+
+class DegradedSource(ChromaSource):
+    """Returns only the first `keep` of the true neighbours, like a low-recall ANN index."""
+
+    def __init__(self, url, keep):
+        super().__init__(url)
+        self.keep = keep
+
+    async def query(self, database, collection_id, embeddings, n_results):
+        r = await super().query(database, collection_id, embeddings, n_results)
+        r["ids"] = [
+            ids[: self.keep] + [f"other-{i}" for i in range(n_results - self.keep)]
+            for ids in r["ids"]
+        ]
+        return r
+
+
+@pytest.mark.parametrize("keep,ok,warned", [(10, True, False), (7, True, True), (3, False, False)])
+async def test_verify_grades_query_overlap(real_chroma, store, keep, ok, warned):
+    seed_source(real_chroma.url)
+    async with ChromaSource(real_chroma.url) as src:
+        await migrate(src, store, collections=["articles"])
+    async with DegradedSource(real_chroma.url, keep) as src:
+        check = await verify(src, store, collections=["articles"], sample=20, k=10)
+    assert check.ok is ok, check.problems
+    assert bool(check.warnings) is warned
+
+
+async def test_migrate_builds_indexes_for_large_collections(real_chroma, pool):
+    seed_source(real_chroma.url)
+    store = Store(pool, pool.pgchroma_info, index_threshold=200)
+    async with ChromaSource(real_chroma.url) as src:
+        report = await migrate(src, store)
+    indexed = {c.name: c.indexed for c in report.collections}
+    assert indexed == {"articles": True, "products": True, "tiny-ip": False}
+    for name in ("articles", "products"):
+        ref = await store.collection(T, D, (await store.get_collection(T, D, name))["id"])
+        assert await store.indexing_progress(ref) == 1.0

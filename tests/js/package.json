@@ -1,0 +1,8 @@
+{
+  "name": "pgchroma-js-compat",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "chromadb": "3.5.0"
+  }
+}

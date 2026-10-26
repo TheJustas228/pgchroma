@@ -315,3 +315,21 @@ def test_decode_embeddings_accepts_base64_and_lists():
     assert decode_embeddings(None) is None
     with pytest.raises(InvalidArgumentError):
         decode_embeddings([[1, 2], [1, 2, 3]])
+
+
+async def test_collection_cache_is_invalidated_by_local_changes(store):
+    c = await make(store)
+    await store.add(c, ["a"], emb([[1, 0]]), None, None, None)
+    ref1 = await store.collection(T, D, c.id)
+    ref2 = await store.collection(T, D, c.id)
+    assert ref1 is ref2  # served from the short-lived cache
+    await store.update_collection(T, D, c.id, "renamed", {"m": 1}, None)
+    assert (await store.collection(T, D, c.id)).name == "renamed"
+    await store.delete_collection(T, D, "renamed")
+    with pytest.raises(NotFoundError):
+        await store.collection(T, D, c.id)
+
+
+async def test_collections_without_dimension_are_never_cached(store):
+    c = await make(store)
+    assert (await store.collection(T, D, c.id)) is not (await store.collection(T, D, c.id))

@@ -1,0 +1,8 @@
+.git
+.venv
+.superpowers
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests/js/node_modules
+docs

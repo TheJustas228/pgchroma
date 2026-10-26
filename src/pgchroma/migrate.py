@@ -39,6 +39,7 @@ class CollectionReport:
     total: int = 0
     copied: int = 0
     resumed: bool = False
+    indexed: bool = False
     seconds: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
@@ -62,6 +63,7 @@ class CollectionCheck:
 class VerifyReport:
     collections: list[CollectionCheck] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -155,6 +157,7 @@ async def _copy_collection(
     to_db: str,
     batch_size: int,
     progress: Progress | None,
+    build_indexes: bool = True,
 ) -> CollectionReport:
     started = time.monotonic()
     report = CollectionReport(coll["name"], database, to_db)
@@ -197,6 +200,10 @@ async def _copy_collection(
         if len(ids) < size:
             break
     await _checkpoint(store, key, ref.id, copied=offset, done=True)
+    # Copy first, index once: building HNSW after the bulk load is far faster than
+    # maintaining it during inserts. Small collections stay on exact search.
+    if build_indexes:
+        report.indexed = await store.build_index(ref, force=False)
     report.copied = offset
     report.seconds = time.monotonic() - started
     return report
@@ -235,6 +242,7 @@ async def migrate(
     batch_size: int = 300,
     concurrency: int = 4,
     progress: Progress | None = None,
+    build_indexes: bool = True,
 ) -> MigrationReport:
     tenant = await source.resolve_tenant()
     jobs = await _jobs(source, databases, collections)
@@ -256,7 +264,16 @@ async def migrate(
     async def run(db: str, coll: dict) -> CollectionReport:
         async with sem:
             return await _copy_collection(
-                source, store, tenant, db, coll, to_tenant, mapping[db], batch_size, progress
+                source,
+                store,
+                tenant,
+                db,
+                coll,
+                to_tenant,
+                mapping[db],
+                batch_size,
+                progress,
+                build_indexes,
             )
 
     tasks = [asyncio.ensure_future(run(db, coll)) for db, coll in jobs]
@@ -359,16 +376,24 @@ async def verify(
         if queries:
             n = min(k, check.source_count)
             theirs = await source.query(db, coll["id"], queries, n)
+            # Compare with pgchroma's exact search: the source may use an approximate index, and
+            # comparing two approximate answers would understate agreement.
             ours = await store.query(
-                ref, np.asarray(queries, dtype=np.float32), n, None, None, None, []
+                ref, np.asarray(queries, dtype=np.float32), n, None, None, None, [], exact=True
             )
             overlaps = [
                 len(set(a) & set(b)) / max(1, len(a))
                 for a, b in zip(theirs["ids"], ours["ids"], strict=True)
             ]
             check.query_overlap = float(np.mean(overlaps))
-            if check.query_overlap < 0.9:
+            if check.query_overlap < 0.5:
                 report.problems.append(
-                    f"{name}: only {check.query_overlap:.0%} of the top-{n} results match the source"
+                    f"{name}: only {check.query_overlap:.0%} of the source's top-{n} results are the "
+                    "exact nearest neighbours here; check the collection's distance space"
+                )
+            elif check.query_overlap < 0.9:
+                report.warnings.append(
+                    f"{name}: the source's top-{n} results agree {check.query_overlap:.0%} with exact "
+                    "search; this is normal for an approximate (HNSW/SPANN) source index"
                 )
     return report

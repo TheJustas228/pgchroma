@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -235,12 +236,24 @@ def _has_null_values(metadatas: list | None) -> bool:
 
 
 class Store:
-    def __init__(self, pool: AsyncConnectionPool, info: PgInfo, *, index_threshold: int = 10_000):
+    def __init__(
+        self,
+        pool: AsyncConnectionPool,
+        info: PgInfo,
+        *,
+        index_threshold: int = 10_000,
+        cache_ttl: float = 2.0,
+    ):
         self.pool = pool
         self.info = info
         self.index_threshold = index_threshold
         self._indexed: set[uuid.UUID] = set()
         self._index_tasks: dict[uuid.UUID, asyncio.Task] = {}
+        # Record operations look their collection up on every request. A short-lived cache
+        # saves that round trip; local changes invalidate it, and collections whose dimension
+        # is not fixed yet are never cached (another process may be doing the first write).
+        self.cache_ttl = cache_ttl
+        self._cache: dict[tuple[str, str, uuid.UUID], tuple[float, CollectionRef]] = {}
 
     @contextlib.asynccontextmanager
     async def _tx(self) -> AsyncIterator[psycopg.AsyncConnection]:
@@ -337,6 +350,7 @@ class Store:
             for (cid,) in ids:
                 await conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(table_ident(cid)))
             await conn.execute("DELETE FROM databases WHERE id = %s", (db_id,))
+        self.clear_cache()
 
     # --------------------------------------------------------- collections
 
@@ -415,8 +429,19 @@ class Store:
 
     async def collection(self, tenant: str, database: str, collection_id: Any) -> CollectionRef:
         cid = _parse_uuid(collection_id)
+        key = (tenant, database, cid)
+        hit = self._cache.get(key)
+        now = time.monotonic()
+        if hit is not None and hit[0] > now:
+            return hit[1]
         async with self._tx() as conn:
-            return await self._find(conn, tenant, database, cid=cid)
+            ref = await self._find(conn, tenant, database, cid=cid)
+        if ref.dimension is not None and self.cache_ttl > 0:
+            self._cache[key] = (now + self.cache_ttl, ref)
+        return ref
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
     async def list_collections(
         self, tenant: str, database: str, limit: int | None, offset: int | None
@@ -481,12 +506,14 @@ class Store:
                     cid,
                 ),
             )
+        self.clear_cache()
 
     async def delete_collection(self, tenant: str, database: str, name: str) -> None:
         async with self._tx() as conn:
             ref = await self._find(conn, tenant, database, name=name)
             await conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(ref.table))
             await conn.execute("DELETE FROM collections WHERE id = %s", (ref.id,))
+        self.clear_cache()
 
     async def fork_collection(
         self, tenant: str, database: str, collection_id: Any, new_name: str
@@ -578,7 +605,7 @@ class Store:
                 sql.SQL(
                     "INSERT INTO {} (id, embedding, document, metadata, uri) "
                     "SELECT u.id, u.embedding, u.document, u.metadata, u.uri "
-                    "FROM unnest(%s::text[], %s::vector[], %s::text[], %s::jsonb[], %s::text[]) "
+                    "FROM unnest(%s::text[], %b::vector[], %s::text[], %s::jsonb[], %s::text[]) "
                     "WITH ORDINALITY AS u(id, embedding, document, metadata, uri, ord) "
                     "ORDER BY u.ord ON CONFLICT (id) DO NOTHING"
                 ).format(coll.table),
@@ -590,7 +617,6 @@ class Store:
                     uris or [None] * len(ids),
                 ),
             )
-        await self._after_write(coll)
 
     async def upsert(self, coll, ids, embeddings, metadatas, documents, uris) -> None:
         self._prepare_write(ids, embeddings, metadatas, documents, uris, need_embeddings=True)
@@ -602,7 +628,7 @@ class Store:
                 sql.SQL(
                     "INSERT INTO {} AS r (id, embedding, document, metadata, uri) "
                     "SELECT u.id, u.embedding, u.document, u.metadata, u.uri "
-                    "FROM unnest(%s::text[], %s::vector[], %s::text[], %s::jsonb[], %s::text[]) "
+                    "FROM unnest(%s::text[], %b::vector[], %s::text[], %s::jsonb[], %s::text[]) "
                     "WITH ORDINALITY AS u(id, embedding, document, metadata, uri, ord) ORDER BY u.ord "
                     "ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding, "
                     "document = COALESCE(EXCLUDED.document, r.document), "
@@ -628,7 +654,6 @@ class Store:
                         ).format(coll.table),
                         (fresh,),
                     )
-        await self._after_write(coll)
 
     async def update(self, coll, ids, embeddings, metadatas, documents, uris) -> None:
         self._prepare_write(ids, embeddings, metadatas, documents, uris, need_embeddings=False)
@@ -643,7 +668,7 @@ class Store:
                     "document = COALESCE(s.document, r.document), uri = COALESCE(s.uri, r.uri), "
                     "metadata = CASE WHEN s.metadata IS NULL THEN r.metadata "
                     "ELSE jsonb_strip_nulls(COALESCE(r.metadata, '{{}}'::jsonb) || s.metadata) END "
-                    "FROM unnest(%s::text[], %s::vector[], %s::text[], %s::jsonb[], %s::text[]) "
+                    "FROM unnest(%s::text[], %b::vector[], %s::text[], %s::jsonb[], %s::text[]) "
                     "AS s(id, embedding, document, metadata, uri) WHERE r.id = s.id"
                 ).format(coll.table),
                 (
@@ -655,27 +680,94 @@ class Store:
                 ),
             )
 
-    async def _after_write(self, coll: CollectionRef) -> None:
-        """Start a background HNSW build once the collection is big enough (see indexing.py)."""
+    def _maybe_index(self, coll: CollectionRef) -> None:
+        """Reads trigger a background HNSW build once a collection is big enough.
+
+        Writes never do: maintaining an HNSW index makes every insert far slower, so bulk loads
+        (and migrations) run without one and the index is built once, when searches need it.
+        """
         if coll.id in self._indexed or coll.id in self._index_tasks:
             return
-        plan = index_plan(coll.dimension, coll.space, self.info)
-        if plan is None:
+        if index_plan(coll.dimension, coll.space, self.info) is None:
             return
-        table = f"c_{coll.id.hex}"
 
         async def build() -> None:
             try:
-                if await ensure_index(
-                    self.pool, table, plan, coll.configuration.get("hnsw", {}), self.index_threshold
-                ):
+                if await self.build_index(coll, force=False):
                     self._indexed.add(coll.id)
-            except Exception:  # never fail a write because an index build failed
-                log.exception("HNSW index build failed for %s", table)
+            except Exception:  # never fail a search because an index build failed
+                log.exception("HNSW index build failed for c_%s", coll.id.hex)
             finally:
                 self._index_tasks.pop(coll.id, None)
 
         self._index_tasks[coll.id] = asyncio.create_task(build())
+
+    async def build_index(self, coll: CollectionRef, *, force: bool = True) -> bool:
+        """Build the collection's HNSW index now (or only above the threshold if not `force`)."""
+        if coll.dimension is None:
+            coll = await self.collection(coll.tenant, coll.database, coll.id)
+        plan = index_plan(coll.dimension, coll.space, self.info)
+        if plan is None:
+            return False
+        built = await ensure_index(
+            self.pool,
+            f"c_{coll.id.hex}",
+            plan,
+            coll.configuration.get("hnsw", {}),
+            0 if force else self.index_threshold,
+        )
+        if built:
+            self._indexed.add(coll.id)
+        return built
+
+    async def indexing_progress(self, coll: CollectionRef) -> float:
+        """1.0 when searches use an index or don't need one; build progress otherwise."""
+        table = f"c_{coll.id.hex}"
+        if index_plan(coll.dimension, coll.space, self.info) is None:
+            return 1.0
+        async with self._tx() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                    "WHERE c.relname = %s AND c.relnamespace = current_schema()::regnamespace",
+                    (f"{table}_hnsw",),
+                )
+            ).fetchone()
+            if row is not None and row[0]:
+                return 1.0
+            n = (
+                await (
+                    await conn.execute(
+                        sql.SQL("SELECT count(*) FROM (SELECT 1 FROM {} LIMIT %s) s").format(
+                            coll.table
+                        ),
+                        (self.index_threshold,),
+                    )
+                ).fetchone()
+            )[0]
+            if n < self.index_threshold:
+                return 1.0
+            p = await (
+                await conn.execute(
+                    "SELECT blocks_done, blocks_total, tuples_done, tuples_total "
+                    "FROM pg_stat_progress_create_index WHERE relid = %s::regclass",
+                    (sql.Identifier(table).as_string(conn),),
+                )
+            ).fetchone()
+        if p is None:
+            return 0.0
+        blocks_done, blocks_total, tuples_done, tuples_total = p
+        if tuples_total:
+            return min(0.99, tuples_done / tuples_total)
+        if blocks_total:
+            return min(0.99, blocks_done / blocks_total)
+        return 0.0
+
+    async def close(self) -> None:
+        """Cancel background index builds (an interrupted CONCURRENTLY build is retried later)."""
+        for task in list(self._index_tasks.values()):
+            task.cancel()
+        await asyncio.gather(*self._index_tasks.values(), return_exceptions=True)
 
     async def wait_for_indexing(self) -> None:
         """Wait for background index builds (tests and graceful shutdown)."""
@@ -780,17 +872,21 @@ class Store:
         params: list,
         filtered: bool,
         columns: list[str],
+        exact: bool = False,
     ) -> list[tuple]:
         """Nearest neighbours for each query: rows of (query ordinal, id, distance, seq, *columns)."""
+        self._maybe_index(coll)
         op, dist = _SPACE_SQL[coll.space]
         plan = index_plan(coll.dimension, coll.space, self.info)
         order_sql = plan.order_by("q.v") if plan else f"embedding {op} q.v"
         outer = "".join(", r." + c.rsplit(" AS ", 1)[-1] for c in columns)
         query = sql.SQL(
             "SELECT q.ord, r.id, r.distance, r.seq{outer} "
-            "FROM unnest(%s::vector[]) WITH ORDINALITY AS q(v, ord) "
+            "FROM unnest(%b::vector[]) WITH ORDINALITY AS q(v, ord) "
             "CROSS JOIN LATERAL (SELECT id, seq, {dist} AS distance{inner} FROM {t} WHERE {c} "
-            "ORDER BY {order}, seq LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
+            # The inner ORDER BY must be the bare distance operator or Postgres cannot use the
+            # HNSW index; ties are broken by insertion order in the outer ORDER BY.
+            "ORDER BY {order} LIMIT %s) r ORDER BY q.ord, r.distance, r.seq"
         ).format(
             outer=sql.SQL(outer),
             dist=sql.SQL(dist.format(q="q.v")),
@@ -801,25 +897,21 @@ class Store:
         )
         ef_search = int(coll.configuration.get("hnsw", {}).get("ef_search", 100))
         async with self._tx() as conn:
-            # ef_search must cover n or HNSW returns fewer rows (pgvector allows up to 1000).
-            await conn.execute(
-                "SELECT set_config('hnsw.ef_search', %s, true)",
-                (str(min(1000, max(ef_search, n))),),
-            )
-            if filtered:
-                if self.info.has_iterative_scan:
-                    # pgvector 0.8: keep scanning the index until enough rows pass the filter.
-                    await conn.execute(
-                        "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"
-                    )
-                else:
-                    # Older pgvector filters after the index scan and can return too few rows;
-                    # fall back to exact search for filtered queries.
-                    await conn.execute("SELECT set_config('enable_indexscan', 'off', true)")
+            # One round trip for the session settings of this query:
+            # - ef_search must cover n or HNSW returns fewer rows (pgvector allows up to 1000);
+            # - filtered queries on pgvector 0.8 keep scanning the index until enough rows pass
+            #   (iterative scans); older pgvector would return too few rows, so they run exact.
+            settings = ["set_config('hnsw.ef_search', %s, true)"]
+            values = [str(min(1000, max(ef_search, n)))]
+            if exact or (filtered and not self.info.has_iterative_scan):
+                settings.append("set_config('enable_indexscan', 'off', true)")
+            elif filtered:
+                settings.append("set_config('hnsw.iterative_scan', 'relaxed_order', true)")
+            await conn.execute("SELECT " + ", ".join(settings), values)
             return await (await conn.execute(query, [list(queries), *params, n])).fetchall()
 
     async def query(
-        self, coll, query_embeddings, n_results, ids, where, where_document, include
+        self, coll, query_embeddings, n_results, ids, where, where_document, include, *, exact=False
     ) -> dict:
         include = _check_include(include)
         if not isinstance(n_results, int) or isinstance(n_results, bool) or n_results < 1:
@@ -845,6 +937,7 @@ class Store:
                 params,
                 filtered,
                 self._select_columns(include),
+                exact=exact,
             )
             for row in rows:
                 groups[row[0] - 1].append(row)
