@@ -53,8 +53,8 @@ docs.query(query_texts=["how do refunds work?"], n_results=5, where={"lang": "en
   Your vectors are just tables: `pgchroma.c_<collection id>`.
 - **Things single-node Chroma can't do.** The Chroma Cloud **Search API** (`Search`, `Knn`,
   `Rrf`, ranking expressions) and **sparse vectors** (BM25, SPLADE, hybrid search) work on
-  pgchroma. Self-hosted single-node Chroma answers "not implemented" for the Search API and
-  rejects sparse vectors, so pgchroma is the self-hosted home for Chroma Cloud's hybrid search.
+  pgchroma. Single-node Chroma answers "not implemented" for the Search API and rejects sparse
+  vectors; pgchroma runs both on the Postgres you already have, with no Kubernetes cluster.
 
 ## Quickstart
 
@@ -322,7 +322,8 @@ so they need Python 3.11+. `tests/test_js_client.py` needs Node.js.
 **Is this affiliated with Chroma?** No. pgchroma is an independent open-source project that
 implements Chroma's public HTTP API. Chroma is a trademark of its owners.
 
-**Why not just self-host Chroma?** You can, and for many people that's the right move.
+**Why not just self-host Chroma?** You can, and for many people that's the right move:
+Chroma's own `chroma copy --from-cloud` moves dense collections to a self-hosted Chroma.
 pgchroma is for teams that would rather not run another stateful service, who already trust
 Postgres with their data, who want SQL joins between vectors and the rest of their data, or who
 use the Search API, which single-node Chroma doesn't implement.

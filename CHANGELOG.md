@@ -5,7 +5,7 @@
 - Added: sparse vector search. `Knn` over `SparseVector` metadata fields with Chroma Cloud's
   scoring (`1 - query·document`), BM25 weighting when the schema sets `bm25=True`, and hybrid
   `Rrf` of dense and sparse results. Works with `ChromaBm25EmbeddingFunction` unchanged.
-  Single-node Chroma rejects sparse vectors, so this is new ground for self-hosting.
+  Single-node Chroma rejects sparse vectors; pgchroma runs them on plain Postgres.
 - Added: Search API `group_by` with `MinK` / `MaxK`, following Chroma's RankedGroupBy: top k
   records per group by the aggregate keys, then re-sorted by score before `limit`.
 - Added: `--local-embedding-functions` also replaces Chroma Cloud's hosted `chroma-cloud-splade`
