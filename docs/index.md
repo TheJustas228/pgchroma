@@ -12,9 +12,11 @@ hide:
   <img alt="pgchroma: Chroma's API. Your Postgres." src="assets/banner-light.svg" width="100%">
 </picture>
 
-pgchroma is a server that speaks [Chroma](https://www.trychroma.com/)'s HTTP API and keeps every
-collection in Postgres with [pgvector](https://github.com/pgvector/pgvector). Your existing Chroma
-client code keeps working: you change the host, not the code.
+[Chroma](https://www.trychroma.com/) is a popular open-source vector database: AI apps use it to
+store embeddings and find the most similar documents (RAG, agent memory, semantic search).
+pgchroma is a server that speaks Chroma's HTTP API but keeps every collection in Postgres with
+[pgvector](https://github.com/pgvector/pgvector). Your existing Chroma client code keeps working:
+you change the host, not the code.
 
 [Move off Chroma Cloud](migrate-from-chroma-cloud.md){ .md-button .md-button--primary }
 [Star on GitHub](https://github.com/TheJustas228/pgchroma){ .md-button }
