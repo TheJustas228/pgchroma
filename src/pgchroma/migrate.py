@@ -346,6 +346,25 @@ async def _jobs(source: ChromaSource, databases, collections) -> list[tuple[str,
     return jobs
 
 
+async def run_all(coros: list) -> list:
+    """Run coroutines concurrently and return their results in order.
+
+    The first failure cancels the rest, so a retry never races leftover work.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        if tasks:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for t in done:
+                if t.exception() is not None:
+                    raise t.exception()
+        return [t.result() for t in tasks]
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def migrate(
     source: ChromaSource,
     store: Store,
@@ -393,18 +412,7 @@ async def migrate(
                 local_embedding_functions,
             )
 
-    tasks = [asyncio.ensure_future(run(db, coll)) for db, coll in jobs]
-    try:
-        # Stop everything on the first failure so a retry never races leftover work.
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in done:
-            if t.exception() is not None:
-                raise t.exception()
-        return MigrationReport([t.result() for t in tasks])
-    finally:
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    return MigrationReport(await run_all([run(db, coll) for db, coll in jobs]))
 
 
 def _same_record(src: dict, dst: dict, i: int, j: int) -> list[str]:

@@ -20,7 +20,8 @@ Railway, or the Postgres on your laptop.
 > stops serving reads on **December 22, 2026**
 > ([announcement](https://www.trychroma.com/cloud-wind-down)). `pgchroma migrate` copies
 > your collections into Postgres, verifies them, and your code keeps working with a one-line
-> change. [Jump to the migration guide.](#move-off-chroma-cloud-in-three-commands)
+> change. [Jump to the migration guide.](#move-off-chroma-cloud-in-three-commands) Not sure
+> where to go yet? [`pgchroma export` saves everything to files first.](#back-up-first-decide-later)
 
 <img alt="Terminal recording: pgchroma migrate copies three collections (16,200 records) from a Chroma server into Postgres and verifies them, then pgchroma serve answers a query from unchanged chromadb code" src="docs/assets/demo.gif" width="100%">
 
@@ -166,6 +167,24 @@ Details that matter:
 - **Indexes are built once, after the copy**, which is much faster than maintaining them during
   inserts.
 - **Self-hosted Chroma works too:** `--from http://my-chroma:8000`.
+
+### Back up first, decide later
+
+Not ready to pick a new home? Save everything to files while Chroma Cloud still serves reads
+(no database needed), and load it wherever you like later:
+
+```bash
+uvx --from git+https://github.com/TheJustas228/pgchroma pgchroma export \
+    --from-cloud --api-key "$CHROMA_API_KEY" --out chroma-backup
+```
+
+Each collection becomes one [JSON Lines](https://jsonlines.org/) file,
+`chroma-backup/<database>/<collection>.jsonl`: a header line with the collection's name,
+metadata and configuration, then one line per record (id, embedding, document, metadata, uri).
+Like `migrate`, it only reads and resumes where it stopped. To load it into Postgres later,
+with the same verification as a direct copy:
+`pgchroma migrate --from chroma-backup --database-url "$DATABASE_URL"`.
+[More in the docs.](https://thejustas228.github.io/pgchroma/export-chroma-cloud/)
 
 ### Chroma Cloud's hosted embedding functions
 

@@ -1,4 +1,4 @@
-"""Command line: `pgchroma serve | migrate | verify | doctor`."""
+"""Command line: `pgchroma serve | migrate | export | verify | doctor`."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import time
+from pathlib import Path
 
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
@@ -45,10 +46,13 @@ def _add_db_args(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_source_args(p: argparse.ArgumentParser) -> None:
+def _add_source_args(p: argparse.ArgumentParser, target: bool = True) -> None:
     src = p.add_argument_group("source (Chroma Cloud or any Chroma >= 1.0 server)")
     src.add_argument(
-        "--from", dest="source_url", help="Chroma server URL, e.g. http://localhost:8000"
+        "--from",
+        dest="source_url",
+        help="Chroma server URL, e.g. http://localhost:8000"
+        + (", or a directory written by pgchroma export" if target else ""),
     )
     src.add_argument(
         "--from-cloud", action="store_true", help="read from Chroma Cloud (api.trychroma.com)"
@@ -75,6 +79,8 @@ def _add_source_args(p: argparse.ArgumentParser) -> None:
         dest="collections",
         help="collection name (repeatable; default: all)",
     )
+    if not target:
+        return
     dst = p.add_argument_group("target")
     dst.add_argument(
         "--to-tenant", default="default_tenant", help="target tenant (default: default_tenant)"
@@ -90,6 +96,15 @@ def _source(args):
     if not args.source_url and not args.from_cloud:
         console.print("[red]error:[/] pass --from <url> or --from-cloud")
         raise SystemExit(2)
+    if not args.from_cloud and not args.source_url.startswith(("http://", "https://")):
+        from .export import DirectorySource
+
+        if not Path(args.source_url).is_dir():
+            console.print(
+                f"[red]error:[/] --from {args.source_url} is neither a URL nor an export directory"
+            )
+            raise SystemExit(2)
+        return DirectorySource(args.source_url)
     url = CHROMA_CLOUD_URL if args.from_cloud else args.source_url
     if args.from_cloud and not args.api_key:
         console.print("[red]error:[/] Chroma Cloud needs --api-key (or CHROMA_API_KEY)")
@@ -263,6 +278,85 @@ async def _migrate(args) -> int:
 
 def cmd_migrate(args) -> int:
     return asyncio.run(_migrate(args))
+
+
+# ---------------------------------------------------------------- export
+
+
+def _size(path: Path) -> str:
+    n = path.stat().st_size
+    return f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{n / 1e3:.0f} kB"
+
+
+async def _export(args) -> int:
+    from .export import export
+    from .migrate import MigrationError
+    from .source import SourceError
+
+    if not args.out:
+        console.print("[red]error:[/] pass --out <directory> for the exported files")
+        return 2
+    try:
+        async with _source(args) as src:
+            tenant = await src.resolve_tenant()
+            console.print(f"Source: [cyan]{src.url}[/] tenant [cyan]{tenant}[/]")
+            started = time.monotonic()
+            with Progress(
+                TextColumn("[bold]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(elapsed_when_finished=True),
+                console=console,
+                transient=False,
+            ) as bar:
+                tasks: dict[str, int] = {}
+
+                def progress(name: str, done: int, total: int) -> None:
+                    if name not in tasks:
+                        tasks[name] = bar.add_task(name, total=total or None)
+                    bar.update(tasks[name], completed=done, total=total or None)
+
+                report = await export(
+                    src,
+                    args.out,
+                    databases=args.databases,
+                    collections=args.collections,
+                    batch_size=args.batch_size,
+                    concurrency=args.concurrency,
+                    progress=progress,
+                )
+    except (MigrationError, SourceError) as e:
+        console.print(f"[red]error:[/] {e}")
+        return 1
+    table = Table(title="Exported", title_justify="left")
+    for col in ("collection", "database", "records", "file", "size", "resumed"):
+        table.add_column(col, justify="right" if col in ("records", "size") else "left")
+    for c in report.collections:
+        table.add_row(
+            c.name,
+            c.database,
+            f"{c.records:,}",
+            str(c.path.relative_to(args.out)),
+            _size(c.path),
+            "yes" if c.resumed else "",
+        )
+    console.print(table)
+    total = sum(c.records for c in report.collections)
+    console.print(
+        f"Saved {total:,} records to [cyan]{args.out}[/] in {time.monotonic() - started:.1f}s."
+    )
+    for c in report.collections:
+        for w in c.warnings:
+            console.print(f"[yellow]![/] {c.name}: {w}")
+    console.print(
+        "\nLoad it into Postgres whenever you like:\n"
+        f'  pgchroma migrate --from {args.out} --database-url "$DATABASE_URL"'
+    )
+    return 0
+
+
+def cmd_export(args) -> int:
+    return asyncio.run(_export(args))
 
 
 async def _verify(args) -> int:
@@ -440,6 +534,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="replace Chroma Cloud's hosted chroma-cloud-qwen with the same open model run locally",
     )
     m.set_defaults(fn=cmd_migrate)
+
+    e = sub.add_parser(
+        "export",
+        help="save collections from Chroma Cloud or a Chroma server to JSON Lines files",
+        epilog=ENV_HELP,
+    )
+    _add_source_args(e, target=False)
+    e.add_argument("--out", help="directory for the exported files (created if missing)")
+    e.add_argument(
+        "--batch-size",
+        type=int,
+        default=300,
+        help="records per request (halved automatically on quota errors)",
+    )
+    e.add_argument("--concurrency", type=int, default=4, help="collections saved in parallel")
+    e.set_defaults(fn=cmd_export)
 
     v = sub.add_parser("verify", help="compare pgchroma with the source again", epilog=ENV_HELP)
     _add_source_args(v)

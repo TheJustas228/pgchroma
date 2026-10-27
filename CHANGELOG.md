@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 (2026-10-27)
+
+- Added: `pgchroma export` saves collections from Chroma Cloud, a self-hosted Chroma or a
+  pgchroma server to JSON Lines files (one file per collection: a header line with the
+  collection, then one line per record). Read-only on the source, resumable, no database
+  needed.
+- Added: `pgchroma migrate --from <export directory>` and `pgchroma verify --from <export
+  directory>` load and check an export, with the same verification as a direct copy.
+- Fixed: `pgchroma migrate` crashed with "Set of Tasks/Futures is empty" when the source had no
+  collections.
+
 ## 0.3.0 (2026-10-27)
 
 - Added: works behind transaction poolers (PgBouncer, Supavisor, Neon's pooled endpoint).

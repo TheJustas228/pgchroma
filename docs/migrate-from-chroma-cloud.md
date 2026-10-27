@@ -13,6 +13,10 @@ moves every collection to Postgres with pgchroma and keeps your application code
 available (Supabase, Neon, RDS, Cloud SQL, Azure, Railway, or Docker), and Python 3.10+ with
 [uv](https://docs.astral.sh/uv/) or Docker.
 
+!!! tip "Not sure where your vectors should go yet?"
+    [Export them to files first](export-chroma-cloud.md): one command, no database, and the
+    export can be loaded into Postgres later with the same verification.
+
 ## 1. Copy your collections
 
 ```bash

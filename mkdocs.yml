@@ -43,6 +43,7 @@ extra_css:
 nav:
   - Home: index.md
   - Move off Chroma Cloud: migrate-from-chroma-cloud.md
+  - Export Chroma Cloud to files: export-chroma-cloud.md
   - Chroma Cloud alternatives: chroma-cloud-alternatives.md
   - Hybrid search on Postgres: hybrid-search.md
   - Hosted embedding functions: embedding-functions.md
