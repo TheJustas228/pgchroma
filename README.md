@@ -3,10 +3,12 @@
   <img alt="pgchroma: Chroma's API. Your Postgres." src="docs/assets/banner-light.svg" width="100%">
 </picture>
 
-pgchroma is a server that speaks [Chroma](https://www.trychroma.com/)'s HTTP API and keeps every
-collection in Postgres with [pgvector](https://github.com/pgvector/pgvector). Point your existing
-Chroma client at it, keep your code, and keep your vectors next to the rest of your data:
-Supabase, Neon, RDS, Cloud SQL, Railway, or the Postgres on your laptop.
+[Chroma](https://www.trychroma.com/) is a popular open-source vector database: AI apps use it to
+store embeddings and find the most similar documents (RAG, agent memory, semantic search).
+pgchroma is a server that speaks Chroma's HTTP API but keeps every collection in Postgres with
+[pgvector](https://github.com/pgvector/pgvector). Point your existing Chroma client at it, keep
+your code, and keep your vectors next to the rest of your data: Supabase, Neon, RDS, Cloud SQL,
+Railway, or the Postgres on your laptop.
 
 [![CI](https://github.com/TheJustas228/pgchroma/actions/workflows/ci.yml/badge.svg)](https://github.com/TheJustas228/pgchroma/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
