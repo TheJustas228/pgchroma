@@ -312,6 +312,7 @@ size and index state.
 
 - [`examples/quickstart.py`](examples/quickstart.py): plain `chromadb` client code against pgchroma
 - [`examples/langchain_rag.py`](examples/langchain_rag.py): the stock `langchain-chroma` vector store and retriever
+- [`examples/llamaindex_rag.py`](examples/llamaindex_rag.py): the stock `llama-index` Chroma vector store and retriever
 - [`examples/local_qwen_embeddings.py`](examples/local_qwen_embeddings.py): Chroma Cloud's Qwen embeddings, locally
 - [`bench/bench.py`](bench/bench.py): the benchmark above
 
